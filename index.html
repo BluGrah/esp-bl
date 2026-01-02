@@ -3,14 +3,15 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ESP32 Station Provisioner</title>
+    <title>ESP32 Certificate Manager</title>
     <style>
-        body { font-family: -apple-system, sans-serif; padding: 20px; background: #f0f2f5; }
+        body { font-family: -apple-system, sans-serif; padding: 20px; background: #f0f2f5; color: #1c1e21; }
         .card { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 20px; }
         h3 { margin-top: 0; color: #007aff; border-bottom: 1px solid #eee; padding-bottom: 10px; }
-        input, button, select { width: 100%; padding: 14px; margin: 8px 0; border-radius: 8px; border: 1px solid #ddd; font-size: 16px; box-sizing: border-box; }
+        button, select { width: 100%; padding: 14px; margin: 8px 0; border-radius: 8px; border: 1px solid #ddd; font-size: 16px; box-sizing: border-box; }
         button { background: #007aff; color: white; border: none; font-weight: bold; cursor: pointer; }
-        button:disabled { background: #ccc; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+        #btnUpload { background: #34a853; } /* Green button for uploading */
         .status { padding: 12px; margin: 8px 0; border-radius: 6px; font-size: 14px; background: #f8f9fa; border-left: 4px solid #ccc; }
         .success { border-left-color: #28a745; background: #e9f7ef; color: #155724; }
         .active { border-left-color: #ffc107; background: #fffde7; }
@@ -21,26 +22,26 @@
 
     <div class="card">
         <h3>1. Connectivity</h3>
-        <input type="text" id="scriptUrl" value="https://script.google.com/macros/s/AKfycbzDNCDnkk1fyyLzk84HR1gKtsraCzN1hSzLpHiVHP-pPXeudtbuwT1Xd03mSZjqiIFb/exec" readonly>
+        <input type="hidden" id="scriptUrl" value="https://script.google.com/macros/s/AKfycbw1guunYp2mZ5mEEsAvjMEbbBXs8u0ZoTZaXf6_zFnQceF0BFi3YL09KCuPyDulkTJU/exec">
         <button id="btnConnect" onclick="connectBLE()">Connect ESP32 Bluetooth</button>
         <p id="bleStatus" style="text-align:center; font-weight:bold;">BLE: Disconnected</p>
     </div>
 
     <div class="card">
-        <h3>2. Select Folder (Station)</h3>
-        <button onclick="fetchAllStations()" style="background: #34a853;">Load Folders from Drive</button>
-        <select id="stationSelect" onchange="onStationChange()">
-            <option value="">-- Select Folder --</option>
+        <h3>2. Station Setup</h3>
+        <select id="stationSelect">
+            <option value="">-- Loading Stations... --</option>
         </select>
+        <button id="btnUpload" disabled onclick="startCertTransfer()">Upload Certs to ESP32</button>
     </div>
 
     <div class="card">
-        <h3>3. Progress</h3>
+        <h3>3. Transfer Logs</h3>
         <div id="caStat" class="status">CA Cert: Waiting...</div>
         <div id="certStat" class="status">Client Cert: Waiting...</div>
         <div id="keyStat" class="status">Client Key: Waiting...</div>
-        <button id="btnUpdate" disabled onclick="triggerModemUpdate()">Write to Modem Memory</button>
-        <div id="debug">Log: Ready.</div>
+        <button id="btnUpdate" disabled onclick="triggerModemUpdate()">Commit to Modem Memory</button>
+        <div id="debug">Log: System Init...</div>
     </div>
 
     <script>
@@ -54,6 +55,31 @@
             d.scrollTop = d.scrollHeight;
         }
 
+        // AUTOMATICALLY LOAD FOLDERS ON PAGE LOAD
+        window.onload = async () => {
+            const url = document.getElementById('scriptUrl').value;
+            if(!url || url.includes("YOUR_EXEC")) {
+                log("Error: No Script URL found in HTML.");
+                return;
+            }
+            log("Auto-fetching station list from Google...");
+            try {
+                const resp = await fetch(`${url}?action=listAllFolders`);
+                const stations = await resp.json();
+                const select = document.getElementById('stationSelect');
+                
+                select.innerHTML = '<option value="">-- Select a Station --</option>';
+                stations.forEach(s => {
+                    let opt = document.createElement('option');
+                    opt.value = s.id;
+                    opt.innerText = s.name;
+                    select.appendChild(opt);
+                });
+                log("Stations loaded. Found " + stations.length + " folders.");
+                document.getElementById('btnUpload').disabled = false;
+            } catch (e) { log("Auto-load failed: Check permissions/URL."); }
+        };
+
         async function connectBLE() {
             try {
                 const device = await navigator.bluetooth.requestDevice({
@@ -64,41 +90,23 @@
                 bleChar = await service.getCharacteristic(C_UUID);
                 document.getElementById('bleStatus').innerText = "BLE: Connected ✅";
                 document.getElementById('bleStatus').style.color = "green";
-                log("Bluetooth Linked.");
+                log("Bluetooth connected to ESP32.");
             } catch (e) { log("BLE Error: " + e); }
         }
 
-        async function fetchAllStations() {
-            const url = document.getElementById('scriptUrl').value;
-            if(!url) { alert("Paste Script URL first!"); return; }
-            log("Accessing Root Directory...");
-            try {
-                const resp = await fetch(`${url}?action=listAllFolders`);
-                const stations = await resp.json();
-                const select = document.getElementById('stationSelect');
-                select.innerHTML = '<option value="">-- Select Folder --</option>';
-                stations.forEach(s => {
-                    let opt = document.createElement('option');
-                    opt.value = s.id;
-                    opt.innerText = s.name;
-                    select.appendChild(opt);
-                });
-                log("Success: Found " + stations.length + " folders.");
-            } catch (e) { log("Error: " + e); }
-        }
+        async function startCertTransfer() {
+            const folderId = document.getElementById('stationSelect').value;
+            if(!folderId) { alert("Please select a station first."); return; }
+            if(!bleChar) { alert("Please connect Bluetooth first."); return; }
 
-        async function onStationChange() {
-            const select = document.getElementById('stationSelect');
-            const folderId = select.value;
-            if(!folderId || !bleChar) { if(!bleChar) alert("Connect BLE first!"); return; }
-            
-            log("Fetching certificates from folder...");
+            log("Fetching certificates from Drive...");
             const url = document.getElementById('scriptUrl').value;
+            
             try {
                 const response = await fetch(`${url}?action=getCerts&id=${folderId}`);
                 const certs = await response.json();
-                
-                // Clear UI
+
+                // Clear UI indicators
                 document.querySelectorAll('.status').forEach(s => s.className = 'status');
 
                 if(certs.ca) await uploadToESP(certs.ca, "root_ca.pem", "caStat");
@@ -106,21 +114,29 @@
                 if(certs.key) await uploadToESP(certs.key, "client_key.pem", "keyStat");
 
                 document.getElementById('btnUpdate').disabled = false;
-                log("Transfer Complete.");
-            } catch (e) { log("Error: " + e); }
+                log("Transfer process finished.");
+            } catch (e) { log("Transfer Error: " + e); }
         }
 
         async function uploadToESP(file, espName, statId) {
             const el = document.getElementById(statId);
             el.className = "status active";
             el.innerText = `Sending ${espName}...`;
-            const raw = atob(file.data);
+            
+            const raw = atob(file.data); // Decode Base64 data from Google
+            log(`Uploading ${espName} (${raw.length} bytes)`);
+
+            // Start File Command
             await bleChar.writeValue(new TextEncoder().encode("S" + espName));
+            
             const size = 150;
             for (let i = 0; i < raw.length; i += size) {
-                await bleChar.writeValue(new TextEncoder().encode("D" + raw.slice(i, i + size)));
-                await new Promise(r => setTimeout(r, 65)); 
+                const chunk = "D" + raw.slice(i, i + size);
+                await bleChar.writeValue(new TextEncoder().encode(chunk));
+                await new Promise(r => setTimeout(r, 65)); // Small delay for ESP32 flash memory
             }
+            
+            // End File Command
             await bleChar.writeValue(new TextEncoder().encode("E"));
             el.className = "status success";
             el.innerText = `${espName}: Ready ✅`;
@@ -128,8 +144,8 @@
 
         async function triggerModemUpdate() {
             await bleChar.writeValue(new TextEncoder().encode("U"));
-            log("Sent Update Command to ESP32.");
-            alert("Modem writing started.");
+            log("Command sent: Write to Modem Memory.");
+            alert("Modem update sequence started!");
         }
     </script>
 </body>
