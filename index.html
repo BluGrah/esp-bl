@@ -3,43 +3,45 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ESP32 Cert Provisioner</title>
+    <title>ESP32 Station Provisioner</title>
     <style>
         body { font-family: -apple-system, sans-serif; padding: 20px; background: #f0f2f5; color: #1c1e21; }
         .card { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 20px; }
         h3 { margin-top: 0; color: #007aff; border-bottom: 1px solid #eee; padding-bottom: 10px; }
-        input, button { width: 100%; padding: 14px; margin: 8px 0; border-radius: 8px; border: 1px solid #ddd; font-size: 16px; box-sizing: border-box; }
-        button { background: #007aff; color: white; border: none; font-weight: bold; cursor: pointer; transition: 0.2s; }
-        button:disabled { background: #ccc; cursor: not-allowed; }
+        input, button, select { width: 100%; padding: 14px; margin: 8px 0; border-radius: 8px; border: 1px solid #ddd; font-size: 16px; box-sizing: border-box; }
+        button { background: #007aff; color: white; border: none; font-weight: bold; cursor: pointer; }
+        button:disabled { background: #ccc; }
+        select { background-color: #fff; cursor: pointer; }
         .status { padding: 12px; margin: 8px 0; border-radius: 6px; font-size: 14px; background: #f8f9fa; border-left: 4px solid #ccc; }
         .success { border-left-color: #28a745; background: #e9f7ef; color: #155724; }
         .active { border-left-color: #ffc107; background: #fffde7; }
-        .folder-item { padding: 15px; border: 1px solid #eee; margin-top: 5px; border-radius: 8px; color: #007aff; cursor: pointer; background: #fff; display: block; text-align: left; }
-        #debug { font-family: monospace; font-size: 11px; background: #222; color: #0f0; padding: 10px; border-radius: 5px; max-height: 150px; overflow-y: auto; margin-top: 10px; }
+        #debug { font-family: monospace; font-size: 11px; background: #222; color: #0f0; padding: 10px; border-radius: 5px; max-height: 120px; overflow-y: auto; margin-top: 10px; }
     </style>
 </head>
 <body>
 
     <div class="card">
-        <h3>1. Connectivity</h3>
+        <h3>1. Connection</h3>
         <input type="text" id="scriptUrl" placeholder="https://script.google.com/macros/s/AKfycbzwDuU25SSB6mh-VZ4X4rgTC9wMDzIYe7ROmTVpI42gRhtxTxorCHeZl9RNuW0ynxP7/exec">
         <button id="btnConnect" onclick="connectBLE()">Connect ESP32 Bluetooth</button>
         <p id="bleStatus" style="text-align:center; font-weight:bold;">BLE: Disconnected</p>
     </div>
 
     <div class="card">
-        <h3>2. Directory Search</h3>
-        <input type="text" id="searchQ" placeholder="Type folder name to search..." oninput="searchDrive()">
-        <div id="results"></div>
+        <h3>2. Select Station</h3>
+        <button onclick="fetchAllStations()" style="background: #34a853;">Refresh Station List</button>
+        <select id="stationSelect" onchange="onStationChange()">
+            <option value="">-- Choose a Station --</option>
+        </select>
     </div>
 
     <div class="card">
-        <h3>3. Progress</h3>
+        <h3>3. Transfer Status</h3>
         <div id="caStat" class="status">CA Cert: Waiting...</div>
         <div id="certStat" class="status">Client Cert: Waiting...</div>
         <div id="keyStat" class="status">Client Key: Waiting...</div>
         <button id="btnUpdate" disabled onclick="triggerModemUpdate()">Write to Modem Memory</button>
-        <div id="debug">Log: Ready...</div>
+        <div id="debug">System Ready...</div>
     </div>
 
     <script>
@@ -55,63 +57,69 @@
 
         async function connectBLE() {
             try {
-                log("Requesting device...");
+                log("Requesting ESP32...");
                 const device = await navigator.bluetooth.requestDevice({
                     filters: [{ services: [SERVICE_UUID] }]
                 });
                 const server = await device.gatt.connect();
                 const service = await server.getPrimaryService(SERVICE_UUID);
                 bleChar = await service.getCharacteristic(CHAR_UUID);
-                
                 document.getElementById('bleStatus').innerText = "BLE: Connected ✅";
                 document.getElementById('bleStatus').style.color = "green";
-                log("Connected to ESP32");
-            } catch (e) { 
-                log("Error: " + e);
-                alert("Connection failed: " + e); 
-            }
+                log("Bluetooth Linked.");
+            } catch (e) { log("BLE Error: " + e); }
         }
 
-        async function searchDrive() {
+        async function fetchAllStations() {
             const url = document.getElementById('scriptUrl').value;
-            const q = document.getElementById('searchQ').value;
-            const res = document.getElementById('results');
+            if(!url) { alert("Please paste the Script URL first!"); return; }
+            log("Fetching station list...");
             
-            if(!url) return;
-            res.innerHTML = "<small>Searching...</small>";
-
             try {
-                const fullUrl = `${url}?action=search&q=${encodeURIComponent(q)}`;
-                const response = await fetch(fullUrl);
-                const folders = await response.json();
+                const response = await fetch(`${url}?action=listAllFolders`);
+                const stations = await response.json();
+                const select = document.getElementById('stationSelect');
                 
-                let html = '';
-                if(folders.length === 0) html = '<small>No folders found.</small>';
-                
-                folders.forEach(f => {
-                    html += `<div class="folder-item" onclick="loadCerts('${f.id}', '${f.name}')">📁 ${f.name}</div>`;
+                select.innerHTML = '<option value="">-- Choose a Station --</option>';
+                stations.forEach(s => {
+                    let opt = document.createElement('option');
+                    opt.value = s.id;
+                    opt.innerText = s.name;
+                    select.appendChild(opt);
                 });
-                res.innerHTML = html;
-            } catch (e) { log("Search error: " + e); }
+                log("List updated. Found " + stations.length + " stations.");
+            } catch (e) { log("Fetch Error: " + e); }
         }
 
-        async function loadCerts(id, name) {
-            if(!bleChar) { alert("Connect BLE first!"); return; }
+        async function onStationChange() {
+            const select = document.getElementById('stationSelect');
+            const folderId = select.value;
+            const folderName = select.options[select.selectedIndex].text;
+            
+            if(!folderId) return;
+            if(!bleChar) { 
+                alert("Please connect Bluetooth first!"); 
+                select.value = ""; 
+                return; 
+            }
+
+            log("Preparing " + folderName + "...");
             const url = document.getElementById('scriptUrl').value;
-            document.getElementById('results').innerHTML = `<b>Selected: ${name}</b>`;
-            log("Fetching certificates...");
 
             try {
-                const response = await fetch(`${url}?action=getCerts&id=${id}`);
+                const response = await fetch(`${url}?action=getCerts&id=${folderId}`);
                 const certs = await response.json();
+
+                // Reset Statuses
+                document.querySelectorAll('.status').forEach(s => s.className = 'status');
 
                 if(certs.ca) await uploadToESP(certs.ca, "root_ca.pem", "caStat");
                 if(certs.cert) await uploadToESP(certs.cert, "client_cert.pem", "certStat");
                 if(certs.key) await uploadToESP(certs.key, "client_key.pem", "keyStat");
 
                 document.getElementById('btnUpdate').disabled = false;
-                log("All files transferred.");
-            } catch (e) { log("Fetch error: " + e); }
+                log("All files ready for Modem Write.");
+            } catch (e) { log("Error: " + e); }
         }
 
         async function uploadToESP(file, espName, statId) {
@@ -122,26 +130,22 @@
             const raw = atob(file.data);
             log(`Uploading ${espName} (${raw.length} bytes)`);
 
-            // Start command
             await bleChar.writeValue(new TextEncoder().encode("S" + espName));
-            
             const size = 150;
             for (let i = 0; i < raw.length; i += size) {
                 const chunk = "D" + raw.slice(i, i + size);
                 await bleChar.writeValue(new TextEncoder().encode(chunk));
-                await new Promise(r => setTimeout(r, 60)); // Buffer protection
+                await new Promise(r => setTimeout(r, 65)); 
             }
-            
-            // End command
             await bleChar.writeValue(new TextEncoder().encode("E"));
             el.className = "status success";
-            el.innerText = `${espName}: Success ✅`;
+            el.innerText = `${espName}: Ready ✅`;
         }
 
         async function triggerModemUpdate() {
             await bleChar.writeValue(new TextEncoder().encode("U"));
-            log("Update triggered on ESP32.");
-            alert("Modem update started!");
+            log("Modem memory write triggered.");
+            alert("Update Sequence Started!");
         }
     </script>
 </body>
