@@ -3,18 +3,17 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>BC660K-GL Pro Tool</title>
+    <title>BC660K-GL Sync Provisioner</title>
     <style>
         body { font-family: -apple-system, sans-serif; padding: 20px; background: #f0f2f5; }
         .card { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 20px; }
-        h3 { margin-top: 0; color: #007aff; border-bottom: 1px solid #eee; padding-bottom: 8px; }
         button, select { width: 100%; padding: 14px; margin: 8px 0; border-radius: 8px; border: 1px solid #ddd; font-size: 16px; font-weight: bold; }
         button { background: #007aff; color: white; border: none; cursor: pointer; }
         button:disabled { background: #ccc; }
         .status { padding: 10px; margin: 5px 0; border-radius: 6px; background: #eee; border-left: 4px solid #999; font-size: 13px; }
         .success { border-left-color: #28a745; background: #e9f7ef; color: #155724; }
         .active { border-left-color: #ffc107; background: #fffde7; }
-        #debug { font-family: monospace; font-size: 11px; background: #222; color: #0f0; padding: 10px; border-radius: 5px; height: 150px; overflow-y: auto; }
+        #debug { font-family: monospace; font-size: 11px; background: #222; color: #0f0; padding: 10px; border-radius: 5px; height: 140px; overflow-y: auto; }
     </style>
 </head>
 <body>
@@ -22,23 +21,23 @@
 <div class="card">
     <h3>1. Connectivity</h3>
     <input type="hidden" id="scriptUrl" value="https://script.google.com/macros/s/AKfycbw1guunYp2mZ5mEEsAvjMEbbBXs8u0ZoTZaXf6_zFnQceF0BFi3YL09KCuPyDulkTJU/exec">
-    <button id="btnConnect" onclick="connectBLE()">Connect Bluetooth</button>
-    <p id="bleStatus" style="text-align:center; font-weight:bold;">BLE: Disconnected</p>
+    <button id="btnConnect" onclick="connectBLE()">Connect ESP32 Bluetooth</button>
+    <p id="bleStatus" style="text-align:center;">BLE Status: Disconnected</p>
 </div>
 
 <div class="card">
-    <h3>2. Provisioning</h3>
-    <select id="stationSelect"><option>Loading...</option></select>
-    <button id="btnUpload" disabled onclick="startSync()">Transfer All Certificates</button>
+    <h3>2. Certificates</h3>
+    <select id="stationSelect"><option>Loading folders...</option></select>
+    <button id="btnUpload" disabled onclick="startSync()">Transfer All to Modem</button>
 </div>
 
 <div class="card">
-    <h3>3. Progress Log</h3>
-    <div id="caStat" class="status">CA: Waiting</div>
-    <div id="certStat" class="status">Cert: Waiting</div>
-    <div id="keyStat" class="status">Key: Waiting</div>
-    <button id="btnVerify" disabled onclick="verify()">Verify All Storage</button>
-    <div id="debug">Log: Init...</div>
+    <h3>3. Progress</h3>
+    <div id="caStat" class="status">CA: Idle</div>
+    <div id="certStat" class="status">Cert: Idle</div>
+    <div id="keyStat" class="status">Key: Idle</div>
+    <button id="btnVerify" disabled onclick="verify()">Verify Storage</button>
+    <div id="debug">System Log: Ready.</div>
 </div>
 
 <script>
@@ -55,45 +54,44 @@
             const resp = await fetch(document.getElementById('scriptUrl').value + "?action=listAllFolders");
             const stations = await resp.json();
             const sel = document.getElementById('stationSelect');
-            sel.innerHTML = '<option value="">-- Choose Station --</option>';
+            sel.innerHTML = '<option value="">-- Select Station --</option>';
             stations.forEach(s => { sel.innerHTML += `<option value="${s.id}">${s.name}</option>`; });
             document.getElementById('btnUpload').disabled = false;
-            log("Station list loaded.");
-        } catch(e) { log("Error loading stations."); }
+        } catch(e) { log("Error loading station list."); }
     };
 
     async function connectBLE() {
         try {
+            log("Searching for ESP32...");
             const dev = await navigator.bluetooth.requestDevice({filters:[{services:[S_UUID]}]});
             const gatt = await dev.gatt.connect();
             const svc = await gatt.getPrimaryService(S_UUID);
             bleChar = await svc.getCharacteristic(C_UUID);
             
+            // Enable Handshake Notifications
             await bleChar.startNotifications();
-            bleChar.addEventListener('characteristicvaluechanged', async (e) => {
+            bleChar.addEventListener('characteristicvaluechanged', (e) => {
                 let val = new TextDecoder().decode(e.target.value);
                 if(val === "NEXT") {
                     const finished = transferQueue[qIndex];
                     document.getElementById(finished.i).className = "status success";
                     document.getElementById(finished.i).innerText = finished.t + ": SAVED ✅";
-                    log(`Handshake: ${finished.t} confirmed.`);
+                    log(`Success: ${finished.t} confirmed by modem.`);
                     qIndex++; 
-                    setTimeout(processQueue, 500); // 500ms breather before next file
-                } else if (val === "FAIL") {
-                    log("!!! ERROR: Modem rejected file.");
+                    setTimeout(processQueue, 300); // Small pause for stability
                 }
             });
 
-            document.getElementById('bleStatus').innerText = "BLE: Connected ✅";
-            log("Bluetooth Connected.");
-        } catch(e) { log("BLE Connection failed."); }
+            document.getElementById('bleStatus').innerText = "BLE Status: Connected ✅";
+            log("Bluetooth Link Established.");
+        } catch(e) { log("Connection Failed: Ensure Bluetooth is ON."); }
     }
 
     async function startSync() {
         const id = document.getElementById('stationSelect').value;
         if(!id || !bleChar) return;
         
-        log("Fetching files from Drive...");
+        log("Downloading certificates...");
         const resp = await fetch(document.getElementById('scriptUrl').value + `?action=getCerts&id=${id}`);
         const certs = await resp.json();
 
@@ -103,25 +101,23 @@
         if(certs.key) transferQueue.push({d: certs.key, t: "clientkey", i: "keyStat"});
 
         qIndex = 0;
-        // Set Security Level first
-        log("Setting SecLevel 2...");
+        // Initial setup for Modem
         await bleChar.writeValue(new TextEncoder().encode("AAT+QSSLCFG=0,0,\"seclevel\",2"));
-        setTimeout(processQueue, 1000);
+        setTimeout(processQueue, 500);
     }
 
     async function processQueue() {
         if(qIndex >= transferQueue.length) {
-            log("COMPLETE: All certificates synchronized.");
+            log("FINISHED: All 3 files processed.");
             document.getElementById('btnVerify').disabled = false;
             return;
         }
         const item = transferQueue[qIndex];
-        const el = document.getElementById(item.i);
-        el.className = "status active";
-        el.innerText = `Uploading ${item.t}...`;
+        document.getElementById(item.i).className = "status active";
+        document.getElementById(item.i).innerText = `Uploading ${item.t}...`;
         
         const raw = atob(item.d.data);
-        log(`Streaming ${item.t} (${raw.length} bytes)...`);
+        log(`Sending ${item.t} (${raw.length} bytes)`);
         
         await bleChar.writeValue(new TextEncoder().encode("S" + item.t));
         const size = 150;
