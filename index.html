@@ -3,19 +3,17 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>BC660K-GL Provisioner</title>
+    <title>BC660K Synchronized Provisioner</title>
     <style>
         body { font-family: -apple-system, sans-serif; padding: 20px; background: #f0f2f5; }
         .card { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 20px; }
-        h3 { margin-top: 0; color: #007aff; border-bottom: 1px solid #eee; padding-bottom: 10px; }
         button, select { width: 100%; padding: 14px; margin: 8px 0; border-radius: 8px; border: 1px solid #ddd; font-size: 16px; font-weight: bold; }
         button { background: #007aff; color: white; border: none; cursor: pointer; }
         button:disabled { background: #ccc; }
-        #btnUpload { background: #34a853; }
-        .status { padding: 10px; margin: 5px 0; border-radius: 6px; font-size: 13px; background: #eee; border-left: 4px solid #999; }
+        .status { padding: 10px; margin: 5px 0; border-radius: 6px; background: #eee; border-left: 4px solid #999; }
         .success { border-left-color: #28a745; background: #e9f7ef; }
         .active { border-left-color: #ffc107; background: #fffde7; }
-        #debug { font-family: monospace; font-size: 11px; background: #222; color: #0f0; padding: 10px; border-radius: 5px; height: 100px; overflow-y: auto; }
+        #debug { font-family: monospace; font-size: 11px; background: #222; color: #0f0; padding: 10px; border-radius: 5px; height: 120px; overflow-y: auto; }
     </style>
 </head>
 <body>
@@ -24,26 +22,28 @@
     <h3>1. Connectivity</h3>
     <input type="hidden" id="scriptUrl" value="https://script.google.com/macros/s/AKfycbw1guunYp2mZ5mEEsAvjMEbbBXs8u0ZoTZaXf6_zFnQceF0BFi3YL09KCuPyDulkTJU/exec">
     <button id="btnConnect" onclick="connectBLE()">Connect Bluetooth</button>
-    <p id="bleStatus" style="text-align:center;">Status: Disconnected</p>
+    <p id="bleStatus" style="text-align:center;">Disconnected</p>
 </div>
 
 <div class="card">
     <h3>2. Select Station</h3>
-    <select id="stationSelect"><option>Loading stations...</option></select>
-    <button id="btnUpload" disabled onclick="startProvisioning()">Upload Certs to Modem</button>
+    <select id="stationSelect"><option>Loading...</option></select>
+    <button id="btnUpload" disabled onclick="startSyncProvisioning()">Upload Certs Sequence</button>
 </div>
 
 <div class="card">
-    <h3>3. Verification</h3>
-    <div id="caStat" class="status">CA: Idle</div>
-    <div id="certStat" class="status">Cert: Idle</div>
-    <div id="keyStat" class="status">Key: Idle</div>
-    <button id="btnUpdate" disabled onclick="verifyOnModem()">Commit & Verify NVRAM</button>
-    <div id="debug">System Ready.</div>
+    <h3>3. Progress</h3>
+    <div id="caStat" class="status">CA: Waiting</div>
+    <div id="certStat" class="status">Cert: Waiting</div>
+    <div id="keyStat" class="status">Key: Waiting</div>
+    <button id="btnUpdate" disabled onclick="verify()">Verify NVRAM</button>
+    <div id="debug">Log: Ready.</div>
 </div>
 
 <script>
     let bleChar;
+    let transferQueue = [];
+    let qIndex = 0;
     const S_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
     const C_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
 
@@ -54,11 +54,10 @@
             const resp = await fetch(document.getElementById('scriptUrl').value + "?action=listAllFolders");
             const stations = await resp.json();
             const sel = document.getElementById('stationSelect');
-            sel.innerHTML = '<option value="">-- Choose Station --</option>';
+            sel.innerHTML = '<option value="">-- Choose --</option>';
             stations.forEach(s => { sel.innerHTML += `<option value="${s.id}">${s.name}</option>`; });
             document.getElementById('btnUpload').disabled = false;
-            log("Stations loaded automatically.");
-        } catch(e) { log("Load error: " + e); }
+        } catch(e) { log("Fetch error"); }
     };
 
     async function connectBLE() {
@@ -67,54 +66,55 @@
             const gatt = await dev.gatt.connect();
             const svc = await gatt.getPrimaryService(S_UUID);
             bleChar = await svc.getCharacteristic(C_UUID);
+            
+            // Start Listening for the "NEXT" signal
+            await bleChar.startNotifications();
+            bleChar.addEventListener('characteristicvaluechanged', (e) => {
+                let val = new TextDecoder().decode(e.target.value);
+                if(val === "NEXT") { log("Handshake: Success. Moving to next file."); qIndex++; processQueue(); }
+            });
+
             document.getElementById('bleStatus').innerText = "Connected ✅";
-            log("BLE Connected.");
-        } catch(e) { log("BLE Error."); }
+        } catch(e) { log("BLE Error"); }
     }
 
-    async function startProvisioning() {
+    async function startSyncProvisioning() {
         const id = document.getElementById('stationSelect').value;
-        if(!id || !bleChar) return;
-        
-        log("Fetching from Drive...");
         const resp = await fetch(document.getElementById('scriptUrl').value + `?action=getCerts&id=${id}`);
         const certs = await resp.json();
 
-        // Ensure modem is in seclevel 2
-        await bleChar.writeValue(new TextEncoder().encode("AAT+QSSLCFG=0,0,\"seclevel\",2"));
-        await new Promise(r => setTimeout(r, 500));
+        transferQueue = [];
+        if(certs.ca) transferQueue.push({d: certs.ca, t: "cacert", i: "caStat"});
+        if(certs.cert) transferQueue.push({d: certs.cert, t: "clientcert", i: "certStat"});
+        if(certs.key) transferQueue.push({d: certs.key, t: "clientkey", i: "keyStat"});
 
-        if(certs.ca) await uploadData(certs.ca, "cacert", "caStat");
-        if(certs.cert) await uploadData(certs.cert, "clientcert", "certStat");
-        if(certs.key) await uploadData(certs.key, "clientkey", "keyStat");
-
-        document.getElementById('btnUpdate').disabled = false;
-        log("Transfer Complete.");
+        qIndex = 0;
+        processQueue();
     }
 
-    async function uploadData(file, type, statId) {
-        const el = document.getElementById(statId);
+    async function processQueue() {
+        if(qIndex >= transferQueue.length) {
+            log("ALL FILES SYNCED.");
+            document.getElementById('btnUpdate').disabled = false;
+            return;
+        }
+        const item = transferQueue[qIndex];
+        const el = document.getElementById(item.i);
         el.className = "status active";
-        const raw = atob(file.data);
-        log(`Uploading ${type}...`);
-
-        await bleChar.writeValue(new TextEncoder().encode("S" + type));
+        
+        const raw = atob(item.d.data);
+        log(`Uploading ${item.t}...`);
+        await bleChar.writeValue(new TextEncoder().encode("S" + item.t));
+        
         const size = 150;
         for (let i = 0; i < raw.length; i += size) {
             await bleChar.writeValue(new TextEncoder().encode("D" + raw.slice(i, i + size)));
             await new Promise(r => setTimeout(r, 80)); 
         }
-
         await bleChar.writeValue(new TextEncoder().encode("E"));
-        el.className = "status success";
-        el.innerText = `${type}: Streamed ✅`;
     }
 
-    async function verifyOnModem() {
-        await bleChar.writeValue(new TextEncoder().encode("V"));
-        log("Verification query sent to ESP32.");
-        alert("Verification requested! Check Serial Monitor for file lengths.");
-    }
+    function verify() { bleChar.writeValue(new TextEncoder().encode("V")); }
 </script>
 </body>
 </html>
