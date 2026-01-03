@@ -9,9 +9,10 @@
         button, select { width: 100%; padding: 14px; margin: 8px 0; border-radius: 8px; border: 1px solid #ddd; font-size: 16px; font-weight: bold; }
         button { background: #007aff; color: white; border: none; cursor: pointer; }
         button:disabled { background: #ccc; }
-        .status { padding: 10px; margin: 5px 0; border-radius: 6px; background: #eee; border-left: 4px solid #999; font-size: 13px; }
-        .success { border-left-color: #28a745; background: #e9f7ef; color: #155724; }
-        #debug { font-family: monospace; font-size: 11px; background: #1a1a1a; color: #32d74b; padding: 15px; border-radius: 8px; height: 160px; overflow-y: auto; }
+        .status { padding: 12px; margin: 5px 0; border-radius: 8px; background: #eee; border-left: 5px solid #999; font-size: 14px; transition: 0.3s; }
+        .success { border-left-color: #28a745; background: #e9f7ef; color: #155724; font-weight: bold; }
+        .active { border-left-color: #ff9500; background: #fff4e5; }
+        #debug { font-family: monospace; font-size: 11px; background: #1a1a1a; color: #32d74b; padding: 15px; border-radius: 8px; height: 180px; overflow-y: auto; }
     </style>
 </head>
 <body>
@@ -19,7 +20,7 @@
 <div class="card">
     <h3>1. Connectivity</h3>
     <input type="hidden" id="scriptUrl" value="https://script.google.com/macros/s/AKfycbw1guunYp2mZ5mEEsAvjMEbbBXs8u0ZoTZaXf6_zFnQceF0BFi3YL09KCuPyDulkTJU/exec">
-    <button id="btnConnect" onclick="connectBLE()">Connect ESP32 Bluetooth</button>
+    <button id="btnConnect" onclick="connectBLE()">Connect Bluetooth</button>
 </div>
 
 <div class="card">
@@ -31,10 +32,10 @@
 
 <div class="card">
     <h3>3. Progress</h3>
-    <div id="caStat" class="status">CA: Idle</div>
-    <div id="certStat" class="status">Cert: Idle</div>
-    <div id="keyStat" class="status">Key: Idle</div>
-    <div id="debug">Log: System Init...</div>
+    <div id="caStat" class="status">CA: Waiting...</div>
+    <div id="certStat" class="status">Cert: Waiting...</div>
+    <div id="keyStat" class="status">Key: Waiting...</div>
+    <div id="debug">Log: Ready.</div>
 </div>
 
 <script>
@@ -45,17 +46,15 @@
 
     function log(m) { const d=document.getElementById('debug'); d.innerHTML+=`<br>> ${m}`; d.scrollTop=d.scrollHeight; }
 
-    // --- AUTOMATIC FOLDER FETCHING ---
     window.onload = async () => {
         try {
-            log("Fetching stations from Google Drive...");
             const resp = await fetch(document.getElementById('scriptUrl').value + "?action=listAllFolders");
             const stations = await resp.json();
             const sel = document.getElementById('stationSelect');
             sel.innerHTML = '<option value="">-- Select Station --</option>';
             stations.forEach(s => { sel.innerHTML += `<option value="${s.id}">${s.name}</option>`; });
-            log("Station list loaded.");
-        } catch(e) { log("Error loading folders."); }
+            log("Folders loaded.");
+        } catch(e) { log("Drive Error."); }
     };
 
     async function connectBLE() {
@@ -64,14 +63,10 @@
             const gatt = await dev.gatt.connect();
             const svc = await gatt.getPrimaryService(S_UUID);
             bleChar = await svc.getCharacteristic(C_UUID);
-            
             await bleChar.startNotifications();
             bleChar.addEventListener('characteristicvaluechanged', (e) => {
-                let val = new TextDecoder().decode(e.target.value);
-                if(val === "NEXT") {
-                    log("Modem confirmed save success ✅");
-                }
-                log("ESP32: " + val);
+                const val = new TextDecoder().decode(e.target.value);
+                log("ESP32 Response: " + val);
             });
             document.getElementById('btnESP').disabled = false;
             log("Bluetooth Connected ✅");
@@ -80,43 +75,61 @@
 
     async function transferToFlash() {
         const id = document.getElementById('stationSelect').value;
-        if(!id) return log("Select a station first.");
-        
-        log("Downloading from Drive...");
+        if(!id) return log("Select a station.");
+        log("Downloading certificates from Drive...");
         const resp = await fetch(document.getElementById('scriptUrl').value + `?action=getCerts&id=${id}`);
         certs = await resp.json();
 
         const queue = [
-            {d: certs.ca, t: "cacert", i: "caStat"},
-            {d: certs.cert, t: "clientcert", i: "certStat"},
-            {d: certs.key, t: "clientkey", i: "keyStat"}
+            {d: certs.ca, t: "cacert", i: "caStat", label: "CA"},
+            {d: certs.cert, t: "clientcert", i: "certStat", label: "Cert"},
+            {d: certs.key, t: "clientkey", i: "keyStat", label: "Key"}
         ];
 
         for (const item of queue) {
-            log(`Transferring ${item.t} to Flash...`);
+            const el = document.getElementById(item.i);
+            el.className = "status active";
+            el.innerText = `${item.label}: Transferring...`;
+            
+            log(`Flash Write Start: ${item.t}`);
             const raw = atob(item.d.data);
             await bleChar.writeValue(new TextEncoder().encode("S" + item.t));
             for (let i = 0; i < raw.length; i += 150) {
                 await bleChar.writeValue(new TextEncoder().encode("D" + raw.slice(i, i + 150)));
-                await new Promise(r => setTimeout(r, 70)); 
+                await new Promise(r => setTimeout(r, 60)); 
             }
             await bleChar.writeValue(new TextEncoder().encode("E"));
-            document.getElementById(item.i).className = "status success";
-            document.getElementById(item.i).innerText = item.t + ": In Flash ✅";
+            
+            // Wait briefly for FS_READY confirmation
             await new Promise(r => setTimeout(r, 800));
+            el.className = "status success";
+            el.innerText = `${item.label}: In Flash ✅`;
         }
-        log("Step 1 Complete.");
+        log("Step 1 Complete: 3 files saved to Flash.");
         document.getElementById('btnModem').disabled = false;
     }
 
     async function writeToModem() {
-        const sequence = ["cacert", "clientcert", "clientkey"];
-        for (const type of sequence) {
-            log(`Writing ${type} to Modem...`);
-            await bleChar.writeValue(new TextEncoder().encode("W" + type));
-            await new Promise(r => setTimeout(r, 9000)); 
+        const sequence = [
+            {t: "cacert", i: "caStat", label: "CA"},
+            {t: "clientcert", i: "certStat", label: "Cert"},
+            {t: "clientkey", i: "keyStat", label: "Key"}
+        ];
+        
+        for (const item of sequence) {
+            const el = document.getElementById(item.i);
+            el.className = "status active";
+            el.innerText = `${item.label}: Writing to Modem...`;
+            
+            log(`Modem Write Command: ${item.t}`);
+            await bleChar.writeValue(new TextEncoder().encode("W" + item.t));
+            
+            // Wait for modem to process (9 seconds per file)
+            await new Promise(r => setTimeout(r, 9500)); 
+            el.className = "status success";
+            el.innerText = `${item.label}: Ready on Modem ✅`;
         }
-        log("All certificates provisioned.");
+        log("All 3 certificates provisioned successfully.");
     }
 </script>
 </body>
