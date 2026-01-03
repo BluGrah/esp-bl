@@ -11,7 +11,7 @@
         button:disabled { background: #ccc; }
         .status { padding: 12px; margin: 5px 0; border-radius: 8px; background: #eee; border-left: 5px solid #999; }
         .success { border-left-color: #28a745; background: #e9f7ef; color: #155724; font-weight: bold; }
-        #debug { font-family: monospace; font-size: 11px; background: #1a1a1a; color: #32d74b; padding: 15px; border-radius: 8px; height: 180px; overflow-y: auto; }
+        #debug { font-family: monospace; font-size: 11px; background: #1a1a1a; color: #32d74b; padding: 15px; border-radius: 8px; height: 200px; overflow-y: auto; }
     </style>
 </head>
 <body>
@@ -48,18 +48,15 @@
             const gatt = await dev.gatt.connect();
             const svc = await gatt.getPrimaryService(S_UUID);
             bleChar = await svc.getCharacteristic(C_UUID);
-            
             await bleChar.startNotifications();
             bleChar.addEventListener('characteristicvaluechanged', (e) => {
                 bleResponse = new TextDecoder().decode(e.target.value);
             });
-            
             document.getElementById('btnESP').disabled = false;
             log("Connected ✅");
         } catch(e) { log("BLE Error."); }
     }
 
-    // Helper to wait for ESP32 Handshake
     async function waitAck(val) {
         return new Promise((resolve) => {
             let timer = setInterval(() => {
@@ -68,56 +65,63 @@
                     clearInterval(timer);
                     resolve();
                 }
-            }, 5);
+            }, 10);
         });
     }
 
     async function transferToFlash() {
         const id = document.getElementById('stationSelect').value;
-        if(!id) return log("Error: Select a station");
-        
-        log("Fetching files from Drive...");
         const resp = await fetch(document.getElementById('scriptUrl').value + `?action=getCerts&id=${id}`);
         const certs = await resp.json();
-        
         const queue = [
-            {d: certs.ca, t: "cacert", i: "caStat"},
-            {d: certs.cert, t: "clientcert", i: "certStat"},
-            {d: certs.key, t: "clientkey", i: "keyStat"}
+            {d: certs.ca, t: "cacert", i: "caStat", label: "CA"},
+            {d: certs.cert, t: "clientcert", i: "certStat", label: "Cert"},
+            {d: certs.key, t: "clientkey", i: "keyStat", label: "Key"}
         ];
 
         for (const item of queue) {
-            if(!item.d) { log(`Error: ${item.t} missing from Drive`); continue; }
-            
             const raw = atob(item.d.data);
-            log(`Starting: ${item.t} (${raw.length} bytes)`);
+            log(`File: ${item.t} (${raw.length} bytes)`);
             
-            // 1. Send START command
             await bleChar.writeValue(new TextEncoder().encode("S" + item.t));
             await waitAck("ACK_S");
 
-            // 2. Send DATA chunks
-            const chunkSize = 150;
-            let chunkCount = 0;
-            for (let i = 0; i < raw.length; i += chunkSize) {
-                const chunk = raw.slice(i, i + chunkSize);
-                await bleChar.writeValue(new TextEncoder().encode("D" + chunk));
+            const size = 150;
+            let cCount = 0;
+            for (let i = 0; i < raw.length; i += size) {
+                await bleChar.writeValue(new TextEncoder().encode("D" + raw.slice(i, i + size)));
                 await waitAck("ACK_D");
-                chunkCount++;
-                if(chunkCount % 5 === 0) log(`${item.t}: Chunk ${chunkCount} OK...`);
+                cCount++;
+                if (cCount % 5 === 0) log(`${item.label}: Chunk ${cCount} OK...`);
             }
 
-            // 3. Send END command
             await bleChar.writeValue(new TextEncoder().encode("E"));
             await waitAck("FS_READY");
-
-            // 4. Update UI
             document.getElementById(item.i).className = "status success";
-            document.getElementById(item.i).innerText = `${item.t}: In Flash ✅`;
-            log(`${item.t} saved successfully.`);
+            document.getElementById(item.i).innerText = `${item.label}: In Flash ✅`;
         }
-        log("Step 1 Complete.");
+        log("Step 1 Complete. Ready for Step 2.");
         document.getElementById('btnModem').disabled = false;
+    }
+
+    async function writeToModem() {
+        const sequence = [
+            {t: "cacert", i: "caStat", label: "CA"},
+            {t: "clientcert", i: "certStat", label: "Cert"},
+            {t: "clientkey", i: "keyStat", label: "Key"}
+        ];
+        
+        for (const item of sequence) {
+            log(`Step 2: Writing ${item.label} to Modem...`);
+            await bleChar.writeValue(new TextEncoder().encode("W" + item.t));
+            
+            // Wait for ESP32 to confirm the Modem handshake is finished
+            await waitAck("MODEM_OK");
+            
+            document.getElementById(item.i).innerText = `${item.label}: Ready on Modem ✅`;
+            log(`${item.label} provisioned successfully.`);
+        }
+        log("ALL CERTIFICATES PROVISIONED.");
     }
 
     window.onload = async () => {
@@ -127,19 +131,9 @@
             const sel = document.getElementById('stationSelect');
             sel.innerHTML = '<option value="">-- Select Station --</option>';
             stations.forEach(s => { sel.innerHTML += `<option value="${s.id}">${s.name}</option>`; });
-            log("Folders loaded.");
-        } catch(e) { log("Drive Fetch Error."); }
+            log("Stations loaded.");
+        } catch(e) { log("Fetch Error."); }
     };
-
-    async function writeToModem() {
-        const list = ["cacert", "clientcert", "clientkey"];
-        for (const type of list) {
-            log(`Modem Writing: ${type}...`);
-            await bleChar.writeValue(new TextEncoder().encode("W" + type));
-            await new Promise(r => setTimeout(r, 9000));
-        }
-        log("Provisioning Finished.");
-    }
 </script>
 </body>
 </html>
