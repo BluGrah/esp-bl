@@ -1,49 +1,184 @@
-async function transferToFlash() {
-    const id = document.getElementById('stationSelect').value;
-    log("Fetching files from Drive...");
-    const resp = await fetch(document.getElementById('scriptUrl').value + `?action=getCerts&id=${id}`);
-    const certs = await resp.json();
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BC660K-GL Provisioner v2.7</title>
+    <style>
+        body { font-family: -apple-system, system-ui, sans-serif; padding: 20px; background: #f0f2f5; color: #1c1e21; }
+        .card { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); margin-bottom: 20px; }
+        h3 { margin-top: 0; color: #007aff; }
+        button, select { width: 100%; padding: 14px; margin: 8px 0; border-radius: 8px; border: 1px solid #ddd; font-size: 16px; font-weight: 600; cursor: pointer; transition: 0.2s; }
+        button { background: #007aff; color: white; border: none; }
+        button:hover { background: #0056b3; }
+        button:disabled { background: #d1d1d6; cursor: not-allowed; }
+        .status { padding: 12px; margin: 5px 0; border-radius: 8px; background: #f8f9fa; border-left: 5px solid #adb5bd; font-size: 13px; }
+        .success { border-left-color: #34c759; background: #f2faf3; color: #1a7f37; font-weight: bold; }
+        #debug { font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace; font-size: 12px; background: #1c1c1e; color: #32d74b; padding: 15px; border-radius: 8px; height: 250px; overflow-y: auto; line-height: 1.5; }
+    </style>
+</head>
+<body>
+
+<div class="card">
+    <h3>1. Connectivity</h3>
+    <input type="hidden" id="scriptUrl" value="https://script.google.com/macros/s/AKfycbw1guunYp2mZ5mEEsAvjMEbbBXs8u0ZoTZaXf6_zFnQceF0BFi3YL09KCuPyDulkTJU/exec">
+    <button onclick="connectBLE()">Connect Bluetooth</button>
+</div>
+
+<div class="card">
+    <h3>2. Action Menu</h3>
+    <select id="stationSelect"><option>Loading folders...</option></select>
+    <button id="btnESP" disabled onclick="transferToFlash()">Step 1: Transfer ALL to ESP Flash</button>
+    <button id="btnModem" disabled onclick="writeToModem()" style="background: #34c759;">Step 2: Write to Modem</button>
+</div>
+
+<div class="card">
+    <h3>3. Progress</h3>
+    <div id="caStat" class="status">CA (root_ca.pem): Waiting...</div>
+    <div id="certStat" class="status">Cert (client_cert.pem): Waiting...</div>
+    <div id="keyStat" class="status">Key (client_key.pem): Waiting...</div>
+    <div id="debug">Log: Ready.</div>
+</div>
+
+<script>
+    let bleChar;
+    let bleResponse = null;
+    const S_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
+    const C_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
     
-    // Exact filenames provided by you
-    const targetFiles = ["root_ca.pem", "client_cert.pem", "client_key.pem"];
+    function log(m) { 
+        const d = document.getElementById('debug'); 
+        d.innerHTML += `<div>> ${m}</div>`; 
+        d.scrollTop = d.scrollHeight; 
+    }
 
-    for (let fileName of targetFiles) {
-        const fileObj = certs[fileName];
-        if(!fileObj) {
-            log(`Error: ${fileName} not found in folder.`);
-            continue;
+    // ORIGINAL BLUETOOTH LOGIC - DO NOT CHANGE
+    async function connectBLE() {
+        try {
+            const dev = await navigator.bluetooth.requestDevice({
+                filters: [{ services: [S_UUID] }]
+            });
+            const gatt = await dev.gatt.connect();
+            const svc = await gatt.getPrimaryService(S_UUID);
+            bleChar = await svc.getCharacteristic(C_UUID);
+            
+            await bleChar.startNotifications();
+            bleChar.addEventListener('characteristicvaluechanged', (e) => {
+                bleResponse = new TextDecoder().decode(e.target.value);
+            });
+            
+            document.getElementById('btnESP').disabled = false;
+            log("Connected ✅");
+        } catch(e) { 
+            log("BLE Connection Failed: " + e); 
         }
+    }
 
-        const raw = atob(fileObj.data);
-        log(`Transferring: ${fileName} (${raw.length} bytes)`);
+    async function waitAck(val) {
+        return new Promise((resolve) => {
+            let timer = setInterval(() => {
+                if (bleResponse === val) {
+                    bleResponse = null;
+                    clearInterval(timer);
+                    resolve();
+                }
+            }, 10);
+        });
+    }
+
+    // STEP 1: TRANSFER TO ESP FLASH
+    async function transferToFlash() {
+        const id = document.getElementById('stationSelect').value;
+        if(!id) return log("Error: Select a station.");
         
-        // S Command
-        await bleChar.writeValue(new TextEncoder().encode("S" + fileName));
-        await waitAck("ACK_S");
+        log("Fetching data from Drive...");
+        const resp = await fetch(document.getElementById('scriptUrl').value + `?action=getCerts&id=${id}`);
+        const certs = await resp.json();
+        
+        // Exact filenames required on the ESP32
+        const targets = [
+            { search: "root_ca", name: "root_ca.pem", domId: "caStat" },
+            { search: "client_cert", name: "client_cert.pem", domId: "certStat" },
+            { search: "client_key", name: "client_key.pem", domId: "keyStat" }
+        ];
 
-        // D Command
-        const size = 150;
-        for (let i = 0; i < raw.length; i += size) {
-            await bleChar.writeValue(new TextEncoder().encode("D" + raw.slice(i, i + size)));
-            await waitAck("ACK_D");
+        for (const item of targets) {
+            // Fuzzy search the keys to handle shortened names like "ca"
+            const key = Object.keys(certs).find(k => k.toLowerCase().includes(item.search));
+            const fileObj = certs[key];
+
+            if(!fileObj) {
+                log(`❌ ERROR: ${item.name} not found in this folder.`);
+                log("Keys received: " + Object.keys(certs).join(", "));
+                return; // Stop the process if a file is missing
+            }
+
+            const raw = atob(fileObj.data);
+            log(`Starting: ${item.name} (${raw.length} bytes)`);
+            
+            // Command 'S' (Start) with exact filename
+            await bleChar.writeValue(new TextEncoder().encode("S" + item.name));
+            await waitAck("ACK_S");
+
+            // Command 'D' (Data) - 150 byte chunks
+            const chunkSize = 150;
+            for (let i = 0; i < raw.length; i += chunkSize) {
+                const chunk = raw.slice(i, i + chunkSize);
+                await bleChar.writeValue(new TextEncoder().encode("D" + chunk));
+                await waitAck("ACK_D");
+            }
+
+            // Command 'E' (End)
+            await bleChar.writeValue(new TextEncoder().encode("E"));
+            await waitAck("FS_READY");
+            
+            document.getElementById(item.domId).className = "status success";
+            document.getElementById(item.domId).innerText = `${item.name}: In Flash ✅`;
+            log(`${item.name} saved successfully.`);
         }
 
-        // E Command
-        await bleChar.writeValue(new TextEncoder().encode("E"));
-        await waitAck("FS_READY");
-        log(`${fileName} transferred.`);
+        log("Step 1 Complete. Files verified in ESP Flash.");
+        document.getElementById('btnModem').disabled = false;
     }
-    log("Step 1 Complete.");
-    document.getElementById('btnModem').disabled = false;
-}
 
-async function writeToModem() {
-    const targetFiles = ["root_ca.pem", "client_cert.pem", "client_key.pem"];
-    for (let fileName of targetFiles) {
-        log(`Modem: Writing ${fileName}...`);
-        await bleChar.writeValue(new TextEncoder().encode("W" + fileName));
-        await waitAck("MODEM_OK");
-        log(`${fileName} Ready on Modem.`);
+    // STEP 2: WRITE TO MODEM
+    async function writeToModem() {
+        const files = [
+            { name: "root_ca.pem", domId: "caStat" },
+            { name: "client_cert.pem", domId: "certStat" },
+            { name: "client_key.pem", domId: "keyStat" }
+        ];
+        
+        for (const item of files) {
+            log(`Modem: Writing ${item.name}...`);
+            // Command 'W' (Write) with exact filename
+            await bleChar.writeValue(new TextEncoder().encode("W" + item.name));
+            
+            // Wait for ESP to finish AT commands and notify back
+            await waitAck("MODEM_OK");
+            
+            document.getElementById(item.domId).innerText = `${item.name}: Provisioned ✅`;
+            log(`${item.name} Write OK.`);
+        }
+        log("SUCCESS: All certificates provisioned to Modem.");
     }
-    log("PROVISIONING FINISHED.");
-}
+
+    // Initial folder load
+    window.onload = async () => {
+        try {
+            const resp = await fetch(document.getElementById('scriptUrl').value + "?action=listAllFolders");
+            const stations = await resp.json();
+            const sel = document.getElementById('stationSelect');
+            sel.innerHTML = '<option value="">-- Select Station --</option>';
+            stations.forEach(s => { 
+                sel.innerHTML += `<option value="${s.id}">${s.name}</option>`; 
+            });
+            log("Drive Folders Loaded.");
+        } catch(e) { 
+            log("Drive Fetch Error. Check Script URL."); 
+        }
+    };
+</script>
+
+</body>
+</html>
