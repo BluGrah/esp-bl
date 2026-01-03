@@ -36,20 +36,11 @@
 
 <script>
     let bleChar;
+    let bleResponse = null;
     const S_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
     const C_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
+    
     function log(m) { const d=document.getElementById('debug'); d.innerHTML+=`<br>> ${m}`; d.scrollTop=d.scrollHeight; }
-
-    window.onload = async () => {
-        try {
-            const resp = await fetch(document.getElementById('scriptUrl').value + "?action=listAllFolders");
-            const stations = await resp.json();
-            const sel = document.getElementById('stationSelect');
-            sel.innerHTML = '<option value="">-- Select Station --</option>';
-            stations.forEach(s => { sel.innerHTML += `<option value="${s.id}">${s.name}</option>`; });
-            log("Folders loaded.");
-        } catch(e) { log("Fetch Error."); }
-    };
 
     async function connectBLE() {
         try {
@@ -57,10 +48,27 @@
             const gatt = await dev.gatt.connect();
             const svc = await gatt.getPrimaryService(S_UUID);
             bleChar = await svc.getCharacteristic(C_UUID);
+            
             await bleChar.startNotifications();
+            bleChar.addEventListener('characteristicvaluechanged', (e) => {
+                bleResponse = new TextDecoder().decode(e.target.value);
+            });
+            
             document.getElementById('btnESP').disabled = false;
             log("Connected ✅");
         } catch(e) { log("BLE Error."); }
+    }
+
+    async function waitAck(val) {
+        return new Promise((resolve) => {
+            let timer = setInterval(() => {
+                if (bleResponse === val) {
+                    bleResponse = null;
+                    clearInterval(timer);
+                    resolve();
+                }
+            }, 5);
+        });
     }
 
     async function transferToFlash() {
@@ -71,19 +79,43 @@
 
         for (const item of queue) {
             const raw = atob(item.d.data);
-            log(`Drive Data: ${item.t} (${raw.length} bytes)`);
+            log(`File: ${item.t} (${raw.length} bytes)`);
+            
+            // Send Start
             await bleChar.writeValue(new TextEncoder().encode("S" + item.t));
-            for (let i = 0; i < raw.length; i += 150) {
-                await bleChar.writeValue(new TextEncoder().encode("D" + raw.slice(i, i + 150)));
-                await new Promise(r => setTimeout(r, 70));
+            await waitAck("ACK_S");
+
+            const size = 150;
+            let count = 0;
+            for (let i = 0; i < raw.length; i += size) {
+                const chunk = raw.slice(i, i + size);
+                await bleChar.writeValue(new TextEncoder().encode("D" + chunk));
+                await waitAck("ACK_D");
+                count++;
+                if (count % 5 === 0) log(`Chunk ${count} handshaked...`);
             }
+
+            // Send End
             await bleChar.writeValue(new TextEncoder().encode("E"));
-            await new Promise(r => setTimeout(r, 600));
+            await waitAck("FS_READY");
+
             document.getElementById(item.i).className = "status success";
             document.getElementById(item.i).innerText = `${item.t}: In Flash ✅`;
+            log(`${item.t} transfer finished.`);
         }
         document.getElementById('btnModem').disabled = false;
     }
+
+    window.onload = async () => {
+        try {
+            const resp = await fetch(document.getElementById('scriptUrl').value + "?action=listAllFolders");
+            const stations = await resp.json();
+            const sel = document.getElementById('stationSelect');
+            sel.innerHTML = '<option value="">-- Select Station --</option>';
+            stations.forEach(s => { sel.innerHTML += `<option value="${s.id}">${s.name}</option>`; });
+            log("Stations loaded.");
+        } catch(e) { log("Fetch Error."); }
+    };
 
     async function writeToModem() {
         for (const type of ["cacert", "clientcert", "clientkey"]) {
@@ -91,7 +123,7 @@
             await bleChar.writeValue(new TextEncoder().encode("W" + type));
             await new Promise(r => setTimeout(r, 9000));
         }
-        log("Done.");
+        log("Provisioning Finished.");
     }
 </script>
 </body>
