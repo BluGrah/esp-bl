@@ -1,14 +1,14 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>BC660K Flash-First Provisioner</title>
+    <title>BC660K Provisioner (Flash-FS)</title>
     <style>
-        body { font-family: -apple-system, sans-serif; padding: 20px; background: #f0f2f5; }
+        body { font-family: sans-serif; padding: 20px; background: #f0f2f5; }
         .card { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 20px; }
-        button { width: 100%; padding: 14px; margin: 8px 0; border-radius: 8px; border: none; font-weight: bold; cursor: pointer; }
-        .btn-blue { background: #007aff; color: white; }
-        .btn-green { background: #34c759; color: white; }
-        button:disabled { background: #ccc; cursor: not-allowed; }
+        button, select { width: 100%; padding: 14px; margin: 8px 0; border-radius: 8px; border: 1px solid #ddd; font-weight: bold; }
+        button { background: #007aff; color: white; border: none; cursor: pointer; }
+        .btn-green { background: #34c759; }
+        button:disabled { background: #ccc; }
         #log { background: #1c1c1e; color: #32d74b; padding: 12px; font-family: monospace; height: 180px; overflow-y: auto; font-size: 12px; border-radius: 8px; }
     </style>
 </head>
@@ -16,16 +16,17 @@
 
 <div class="card">
     <h3>1. Connection</h3>
-    <button class="btn-blue" onclick="connect()">Connect Bluetooth</button>
+    <button onclick="connectBLE()">Connect ESP32 Bluetooth</button>
 </div>
 
 <div class="card">
-    <h3>2. Action Menu</h3>
-    <button id="btnESP" class="btn-blue" disabled onclick="transferToFlash()">Step 1: Transfer to ESP Flash</button>
-    <button id="btnModem" class="btn-green" disabled onclick="writeToModem()">Step 2: Write to Modem</button>
+    <h3>2. Select Station</h3>
+    <select id="stationSelect"><option>Loading folders...</option></select>
+    <button id="btnESP" disabled onclick="transferToFlash()">Step 1: Transfer to ESP Flash</button>
+    <button id="btnModem" disabled onclick="writeToModem()">Step 2: Write to Modem</button>
 </div>
 
-<div id="log">Log: Ready...</div>
+<div id="log">Status: Idle</div>
 
 <script>
     let bleChar;
@@ -38,7 +39,18 @@
         l.scrollTop = l.scrollHeight; 
     }
 
-    async function connect() {
+    window.onload = async () => {
+        try {
+            const resp = await fetch(SURL + "?action=listAllFolders");
+            const stations = await resp.json();
+            const sel = document.getElementById('stationSelect');
+            sel.innerHTML = '<option value="">-- Choose Station --</option>';
+            stations.forEach(s => { sel.innerHTML += `<option value="${s.id}">${s.name}</option>`; });
+            log("Station list loaded from Drive.");
+        } catch(e) { log("Error loading folders."); }
+    };
+
+    async function connectBLE() {
         try {
             const dev = await navigator.bluetooth.requestDevice({filters: [{services: ["4fafc201-1fb5-459e-8fcc-c5c9c331914b"]}]});
             const gatt = await dev.gatt.connect();
@@ -47,24 +59,21 @@
             
             await bleChar.startNotifications();
             bleChar.addEventListener('characteristicvaluechanged', (e) => {
-                log("ESP: " + new TextDecoder().decode(e.target.value));
+                log("ESP32: " + new TextDecoder().decode(e.target.value));
             });
-
-            log("Bluetooth Connected ✅");
+            log("Connected ✅");
             document.getElementById('btnESP').disabled = false;
-            fetchData();
-        } catch(e) { log("Conn Error: " + e); }
-    }
-
-    async function fetchData() {
-        log("Downloading certificates from Drive...");
-        // Ensure you replace YOUR_ID or pass it dynamically
-        const res = await fetch(SURL + "?action=getCerts&id=STATION_ID_HERE"); 
-        files = await res.json();
-        log("Files downloaded to browser memory.");
+        } catch(e) { log("Connection Error."); }
     }
 
     async function transferToFlash() {
+        const id = document.getElementById('stationSelect').value;
+        if(!id) { alert("Please select a station"); return; }
+        
+        log("Downloading files from Google Drive...");
+        const res = await fetch(SURL + `?action=getCerts&id=${id}`); 
+        files = await res.json();
+
         const queue = [
             {n: "cacert", d: atob(files.ca.data)},
             {n: "clientcert", d: atob(files.cert.data)},
@@ -72,7 +81,7 @@
         ];
 
         for (const item of queue) {
-            log("Sending " + item.n + " to ESP Flash...");
+            log("Writing " + item.n + " to ESP Flash...");
             await bleChar.writeValue(new TextEncoder().encode("S" + item.n));
             const size = 150;
             for (let i = 0; i < item.d.length; i += size) {
@@ -82,19 +91,18 @@
             await bleChar.writeValue(new TextEncoder().encode("E"));
             await new Promise(r => setTimeout(r, 1000)); 
         }
-        log("✅ STEP 1 COMPLETE: Files are in ESP Flash.");
+        log("✅ Step 1 Complete: Data saved in Flash.");
         document.getElementById('btnModem').disabled = false;
     }
 
     async function writeToModem() {
         const certs = ["cacert", "clientcert", "clientkey"];
         for (const c of certs) {
-            log("Commanding write to Modem: " + c);
+            log("Writing to Modem: " + c);
             await bleChar.writeValue(new TextEncoder().encode("W" + c));
-            // We wait for the MODEM_OK notification or timeout
-            await new Promise(r => setTimeout(r, 10000)); 
+            await new Promise(r => setTimeout(r, 9000)); 
         }
-        log("✅ STEP 2 COMPLETE: Modem provisioning finished.");
+        log("✅ Step 2 Complete: Provisioning finished.");
     }
 </script>
 </body>
