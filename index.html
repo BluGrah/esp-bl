@@ -1,185 +1,97 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>BC660K Manual Provisioner</title>
+    <title>BC660K Provisioner</title>
     <style>
-        :root { --primary: #007aff; --success: #28a745; --bg: #f4f4f7; }
-        body { font-family: -apple-system, sans-serif; padding: 20px; background: var(--bg); color: #333; line-height: 1.5; }
-        .card { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); margin-bottom: 15px; }
-        h3 { margin-top: 0; font-size: 18px; color: #1d1d1f; }
-        label { font-size: 13px; font-weight: 600; color: #666; display: block; margin-bottom: 5px; }
-        select, button { width: 100%; padding: 12px; margin: 8px 0; border-radius: 8px; border: 1px solid #ddd; font-size: 16px; outline: none; }
-        button { background: var(--primary); color: white; border: none; font-weight: bold; cursor: pointer; transition: opacity 0.2s; }
-        button:disabled { background: #ccc; cursor: not-allowed; }
-        button:active { opacity: 0.8; }
-        #debug { background: #1c1c1e; color: #32d74b; padding: 15px; height: 250px; overflow-y: auto; font-family: 'Courier New', monospace; font-size: 12px; border-radius: 8px; border: 1px solid #333; }
-        .log-error { color: #ff453a; }
-        .log-success { color: #32d74b; }
+        body { font-family: sans-serif; padding: 20px; background: #f4f4f7; }
+        .card { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); margin-bottom: 15px; }
+        button, select { width: 100%; padding: 12px; margin: 8px 0; border-radius: 5px; border: 1px solid #ddd; font-size: 16px; }
+        button { background: #007aff; color: white; border: none; font-weight: bold; cursor: pointer; }
+        #debug { background: #1c1c1e; color: #32d74b; padding: 10px; height: 200px; overflow-y: auto; font-family: monospace; font-size: 12px; border-radius: 5px; }
     </style>
 </head>
 <body>
-
+    <div class="card"><button onclick="connectBLE()">1. Connect Bluetooth</button></div>
     <div class="card">
-        <h3>1. Connectivity</h3>
-        <button id="btnConnect" onclick="connectBLE()">Connect Bluetooth Device</button>
+        <label>Select Folder:</label>
+        <select id="folderSel" onchange="fetchFiles()"><option value="">-- Loading --</option></select>
+        <label>Select File:</label>
+        <select id="fileSel" disabled><option>Select folder first</option></select>
+        <button id="btnT" disabled onclick="doTransfer()">2. Transfer to ESP</button>
+        <button id="btnM" disabled onclick="doModem()" style="background:#28a745">3. Write to Modem</button>
     </div>
-
-    <div class="card">
-        <h3>2. Cloud Configuration</h3>
-        <label>Station Folder:</label>
-        <select id="folderSel" onchange="fetchFiles()">
-            <option value="">-- Loading Folders... --</option>
-        </select>
-
-        <label>Certificate File:</label>
-        <select id="fileSel" disabled>
-            <option>Select a folder first</option>
-        </select>
-        
-        <button id="btnTransfer" disabled onclick="doTransfer()">Upload to ESP32 Flash</button>
-        <button id="btnModem" disabled onclick="doModem()" style="background: var(--success);">Provision to BC660K</button>
-    </div>
-
-    <div id="debug"><div>> System ready. Waiting for user...</div></div>
+    <div id="debug">Log: Initializing...</div>
 
 <script>
     let bleChar, bleResponse, driveData;
     const S_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
     const C_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
     
-    // Replace with your EXACT "New Deployment" Web App URL
-    const scriptUrl = "https://script.google.com/macros/s/AKfycbwvhHu5-kZ-D3Vyg9CI1TpE7UndeISj5BIXRpqg-whRaOMYgZ8buf3IJ5KIcPGbof0/exec";
+    // PASTE YOUR NEW DEPLOYMENT URL HERE
+    const scriptUrl = "https://script.google.com/macros/s/AKfycbzvAinYxfH2FNcAOWUXedNnKyIR-f2rKToYzLOF4d5J-5HhN9FOy4rLmHQ2w92Mr7EK/exec";
 
-    function log(m, type='') {
-        const d = document.getElementById('debug');
-        const entry = document.createElement('div');
-        if(type) entry.className = `log-${type}`;
-        entry.innerHTML = `> ${m}`;
-        d.appendChild(entry);
-        d.scrollTop = d.scrollHeight;
-    }
+    function log(m) { const d=document.getElementById('debug'); d.innerHTML+=`<div>> ${m}</div>`; d.scrollTop=d.scrollHeight; }
 
     async function connectBLE() {
         try {
-            log("Opening BLE selector...");
             const dev = await navigator.bluetooth.requestDevice({filters:[{services:[S_UUID]}]});
             const gatt = await dev.gatt.connect();
             const svc = await gatt.getPrimaryService(S_UUID);
             bleChar = await svc.getCharacteristic(C_UUID);
-            
             await bleChar.startNotifications();
-            bleChar.oncharacteristicvaluechanged = (e) => {
-                bleResponse = new TextDecoder().decode(e.target.value);
-            };
-            
-            log("Bluetooth Connected ✅", "success");
-            document.getElementById('btnConnect').style.background = "#8e8e93";
-            document.getElementById('btnConnect').innerText = "Connected: " + dev.name;
-        } catch(e) {
-            log("BLE Error: " + e, "error");
-        }
+            bleChar.oncharacteristicvaluechanged = (e) => bleResponse = new TextDecoder().decode(e.target.value);
+            log("Connected ✅");
+        } catch(e) { log("BLE Error: " + e); }
     }
 
     async function fetchFiles() {
         const id = document.getElementById('folderSel').value;
         if(!id) return;
-        
-        log("Fetching certificates for folder...");
-        try {
-            const resp = await fetch(`${scriptUrl}?action=getCerts&id=${id}`);
-            driveData = await resp.json();
-            
-            const sel = document.getElementById('fileSel');
-            sel.innerHTML = '<option value="">-- Select Certificate --</option>';
-            
-            Object.keys(driveData).forEach(name => {
-                sel.innerHTML += `<option value="${name}">${name}</option>`;
-            });
-            
-            sel.disabled = false;
-            document.getElementById('btnTransfer').disabled = false;
-            log("Files loaded into menu.");
-        } catch(e) {
-            log("Fetch Error: Check Internet or Script permissions.", "error");
-        }
+        log("Fetching files...");
+        const resp = await fetch(`${scriptUrl}?action=getCerts&id=${id}`);
+        driveData = await resp.json();
+        const sel = document.getElementById('fileSel');
+        sel.innerHTML = '<option value="">-- Choose File --</option>';
+        Object.keys(driveData).forEach(name => sel.innerHTML += `<option value="${name}">${name}</option>`);
+        sel.disabled = false; document.getElementById('btnT').disabled = false;
     }
 
     async function doTransfer() {
         const name = document.getElementById('fileSel').value;
-        if(!name || !driveData[name]) return;
-        
         const raw = atob(driveData[name].data);
-        log(`Initiating stream: ${name} (${raw.length} bytes)`);
-        
-        // Start Command: Send "S" + filename
+        log(`Transferring ${name}...`);
         await bleChar.writeValue(new TextEncoder().encode("S" + name));
         while(bleResponse !== "ACK_S") await new Promise(r => setTimeout(r, 50));
         bleResponse = null;
 
-        const chunkSize = 150; 
-        for (let i = 0; i < raw.length; i += chunkSize) {
-            const chunk = raw.slice(i, i + chunkSize);
-            await bleChar.writeValue(new TextEncoder().encode("D" + chunk));
-            // Wait for data acknowledgement from ESP
+        const size = 150;
+        for (let i = 0; i < raw.length; i += size) {
+            await bleChar.writeValue(new TextEncoder().encode("D" + raw.slice(i, i + size)));
             while(bleResponse !== "ACK_D") await new Promise(r => setTimeout(r, 20));
             bleResponse = null;
-            
-            if(i % 450 === 0) log(`Sent ${i}/${raw.length} bytes...`);
         }
-
-        // End Command: Send "E"
         await bleChar.writeValue(new TextEncoder().encode("E"));
         while(bleResponse !== "FS_READY") await new Promise(r => setTimeout(r, 50));
-        
-        log(`Transfer Complete: ${name} saved to ESP flash.`, "success");
-        document.getElementById('btnModem').disabled = false;
+        log("Saved to ESP ✅"); document.getElementById('btnM').disabled = false;
     }
 
     async function doModem() {
         const name = document.getElementById('fileSel').value;
-        log(`Provisioning ${name} to BC660K...`);
-        
-        // Write Command: Send "W" + filename
         await bleChar.writeValue(new TextEncoder().encode("W" + name));
-        
-        while(bleResponse !== "MODEM_OK" && bleResponse !== "MODEM_FAIL") {
-            await new Promise(r => setTimeout(r, 100));
-        }
-        
-        if(bleResponse === "MODEM_OK") {
-            log("Success: Modem accepted certificate.", "success");
-        } else {
-            log("Error: Modem rejected certificate write.", "error");
-        }
+        while(bleResponse !== "MODEM_OK" && bleResponse !== "MODEM_FAIL") await new Promise(r => setTimeout(r, 50));
+        log("Modem Result: " + bleResponse);
         bleResponse = null;
     }
 
     window.onload = async () => {
-        log("Loading stations from Google Drive...");
         try {
             const resp = await fetch(`${scriptUrl}?action=listAllFolders`);
-            if(!resp.ok) throw new Error("Redirect failed");
-            
             const folders = await resp.json();
             const sel = document.getElementById('folderSel');
-            
-            if(folders.length === 0) {
-                sel.innerHTML = '<option value="">No folders found</option>';
-                log("Warning: No subfolders found in Root ID.", "error");
-            } else {
-                sel.innerHTML = '<option value="">-- Select Folder --</option>';
-                folders.forEach(f => {
-                    sel.innerHTML += `<option value="${f.id}">${f.name}</option>`;
-                });
-                log(`Loaded ${folders.length} folders.`);
-            }
-        } catch(e) {
-            log("Failed to load folders.", "error");
-            log("1. Check Script URL.");
-            log("2. Ensure Script is Deployed as 'Anyone'.");
-        }
+            sel.innerHTML = '<option value="">-- Select Folder --</option>';
+            folders.forEach(f => sel.innerHTML += `<option value="${f.id}">${f.name}</option>`);
+            log("Folders loaded.");
+        } catch(e) { log("Load Error. Check Script Deployment Access (set to 'Anyone')."); }
     };
 </script>
 </body>
