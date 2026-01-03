@@ -2,169 +2,129 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>BC660K-GL Provisioner v2.7</title>
+    <title>Manual Provisioner v2.7</title>
     <style>
-        body { font-family: -apple-system, system-ui, sans-serif; padding: 20px; background: #f0f2f5; color: #1c1e21; }
-        .card { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); margin-bottom: 20px; }
-        h3 { margin-top: 0; color: #007aff; }
-        button, select { width: 100%; padding: 14px; margin: 8px 0; border-radius: 8px; border: 1px solid #ddd; font-size: 16px; font-weight: 600; cursor: pointer; transition: 0.2s; }
+        body { font-family: -apple-system, sans-serif; padding: 20px; background: #f4f4f7; }
+        .card { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        button, select { width: 100%; padding: 14px; margin: 8px 0; border-radius: 8px; border: 1px solid #ddd; font-size: 16px; font-weight: bold; cursor: pointer; }
         button { background: #007aff; color: white; border: none; }
-        button:hover { background: #0056b3; }
-        button:disabled { background: #d1d1d6; cursor: not-allowed; }
-        .status { padding: 12px; margin: 5px 0; border-radius: 8px; background: #f8f9fa; border-left: 5px solid #adb5bd; font-size: 13px; }
-        .success { border-left-color: #34c759; background: #f2faf3; color: #1a7f37; font-weight: bold; }
-        #debug { font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace; font-size: 12px; background: #1c1c1e; color: #32d74b; padding: 15px; border-radius: 8px; height: 250px; overflow-y: auto; line-height: 1.5; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+        #debug { background: #1c1c1e; color: #32d74b; padding: 15px; border-radius: 8px; height: 250px; overflow-y: auto; font-family: monospace; font-size: 12px; }
+        label { font-size: 14px; color: #666; font-weight: bold; margin-top: 10px; display: block; }
     </style>
 </head>
 <body>
 
 <div class="card">
-    <h3>1. Connectivity</h3>
-    <input type="hidden" id="scriptUrl" value="https://script.google.com/macros/s/AKfycbw1guunYp2mZ5mEEsAvjMEbbBXs8u0ZoTZaXf6_zFnQceF0BFi3YL09KCuPyDulkTJU/exec">
-    <button onclick="connectBLE()">Connect Bluetooth</button>
+    <button onclick="connectBLE()">1. Connect Bluetooth</button>
 </div>
 
 <div class="card">
-    <h3>2. Action Menu</h3>
-    <select id="stationSelect"><option>Loading folders...</option></select>
-    <button id="btnESP" disabled onclick="transferToFlash()">Step 1: Transfer ALL to ESP Flash</button>
-    <button id="btnModem" disabled onclick="writeToModem()" style="background: #34c759;">Step 2: Write to Modem</button>
+    <label>Select Folder:</label>
+    <select id="stationSelect" onchange="loadFilesFromFolder()">
+        <option>Loading folders...</option>
+    </select>
+
+    <label>Select File in Folder:</label>
+    <select id="fileSelect" disabled>
+        <option>Choose a folder first</option>
+    </select>
+    
+    <button id="btnTransfer" disabled onclick="transferManual()">2. Transfer Selected File to ESP</button>
+    <button id="btnModem" disabled onclick="writeManual()" style="background: #28a745;">3. Write Selected File to Modem</button>
 </div>
 
-<div class="card">
-    <h3>3. Progress</h3>
-    <div id="caStat" class="status">CA (root_ca.pem): Waiting...</div>
-    <div id="certStat" class="status">Cert (client_cert.pem): Waiting...</div>
-    <div id="keyStat" class="status">Key (client_key.pem): Waiting...</div>
-    <div id="debug">Log: Ready.</div>
-</div>
+<div id="debug">Log: Ready.</div>
 
 <script>
-    let bleChar;
-    let bleResponse = null;
+    let bleChar, bleResponse = null;
+    let driveFileData = null;
     const S_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
     const C_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
-    
-    function log(m) { 
-        const d = document.getElementById('debug'); 
-        d.innerHTML += `<div>> ${m}</div>`; 
-        d.scrollTop = d.scrollHeight; 
-    }
+    const scriptUrl = "https://script.google.com/macros/s/AKfycbw1guunYp2mZ5mEEsAvjMEbbBXs8u0ZoTZaXf6_zFnQceF0BFi3YL09KCuPyDulkTJU/exec";
 
-    // ORIGINAL BLUETOOTH LOGIC
+    function log(m) { const d=document.getElementById('debug'); d.innerHTML+=`<div>> ${m}</div>`; d.scrollTop=d.scrollHeight; }
+
     async function connectBLE() {
         try {
-            const dev = await navigator.bluetooth.requestDevice({
-                filters: [{ services: [S_UUID] }]
-            });
+            const dev = await navigator.bluetooth.requestDevice({filters:[{services:[S_UUID]}]});
             const gatt = await dev.gatt.connect();
             const svc = await gatt.getPrimaryService(S_UUID);
             bleChar = await svc.getCharacteristic(C_UUID);
-            
             await bleChar.startNotifications();
             bleChar.addEventListener('characteristicvaluechanged', (e) => {
                 bleResponse = new TextDecoder().decode(e.target.value);
             });
-            
-            document.getElementById('btnESP').disabled = false;
             log("Connected ✅");
-        } catch(e) { 
-            log("BLE Connection Failed: " + e); 
-        }
+        } catch(e) { log("BLE Error."); }
     }
 
     async function waitAck(val) {
-        return new Promise((resolve) => {
-            let timer = setInterval(() => {
-                if (bleResponse === val) {
-                    bleResponse = null;
-                    clearInterval(timer);
-                    resolve();
-                }
+        return new Promise(resolve => {
+            const timer = setInterval(() => {
+                if(bleResponse === val) { bleResponse = null; clearInterval(timer); resolve(); }
             }, 10);
         });
     }
 
-    async function transferToFlash() {
+    // Fetches the files and fills the second dropdown
+    async function loadFilesFromFolder() {
         const id = document.getElementById('stationSelect').value;
-        if(!id) return log("Error: Select a station.");
+        if(!id) return;
+        log("Checking Drive files...");
+        const resp = await fetch(scriptUrl + `?action=getCerts&id=${id}`);
+        driveFileData = await resp.json();
         
-        log("Fetching data from Drive...");
-        const resp = await fetch(document.getElementById('scriptUrl').value + `?action=getCerts&id=${id}`);
-        const certs = await resp.json();
+        const fSel = document.getElementById('fileSelect');
+        fSel.innerHTML = '<option value="">-- Choose a File --</option>';
         
-        // Configuration for fuzzy mapping shortened keys to exact filenames
-        const targetConfigs = [
-            { search: "root_ca", exactName: "root_ca.pem", domId: "caStat" },
-            { search: "client_cert", exactName: "client_cert.pem", domId: "certStat" },
-            { search: "client_key", exactName: "client_key.pem", domId: "keyStat" }
-        ];
+        // Add filenames from the JSON response to the dropdown
+        Object.keys(driveFileData).forEach(name => {
+            fSel.innerHTML += `<option value="${name}">${name}</option>`;
+        });
+        
+        fSel.disabled = false;
+        document.getElementById('btnTransfer').disabled = false;
+        log("File menu updated.");
+    }
 
-        for (const item of targetConfigs) {
-            // Find the key in the JSON response that contains our search string (e.g. "ca")
-            const key = Object.keys(certs).find(k => k.toLowerCase().includes(item.search));
-            const fileObj = certs[key];
+    async function transferManual() {
+        const fileName = document.getElementById('fileSelect').value;
+        if(!fileName || !driveFileData[fileName]) return log("Select a file.");
 
-            if(!fileObj) {
-                log(`❌ Error: ${item.exactName} not found in Drive data.`);
-                log("Keys received: " + Object.keys(certs).join(", "));
-                return; // Stop if any file is missing
-            }
+        const raw = atob(driveFileData[fileName].data);
+        log(`Streaming: ${fileName} (${raw.length} bytes)`);
 
-            const raw = atob(fileObj.data);
-            log(`Transferring: ${item.exactName} (${raw.length} bytes)`);
-            
-            // S Command (Start) - Sends the EXACT filename you required
-            await bleChar.writeValue(new TextEncoder().encode("S" + item.exactName));
-            await waitAck("ACK_S");
+        await bleChar.writeValue(new TextEncoder().encode("S" + fileName));
+        await waitAck("ACK_S");
 
-            // D Command (Data)
-            const size = 150;
-            for (let i = 0; i < raw.length; i += size) {
-                const chunk = raw.slice(i, i + size);
-                await bleChar.writeValue(new TextEncoder().encode("D" + chunk));
-                await waitAck("ACK_D");
-            }
-
-            // E Command (End)
-            await bleChar.writeValue(new TextEncoder().encode("E"));
-            await waitAck("FS_READY");
-            
-            document.getElementById(item.domId).className = "status success";
-            document.getElementById(item.domId).innerText = `${item.exactName}: In Flash ✅`;
-            log(`${item.exactName} transferred.`);
+        const size = 150;
+        for (let i = 0; i < raw.length; i += size) {
+            await bleChar.writeValue(new TextEncoder().encode("D" + raw.slice(i, i + size)));
+            await waitAck("ACK_D");
         }
 
-        log("Step 1 Complete.");
+        await bleChar.writeValue(new TextEncoder().encode("E"));
+        await waitAck("FS_READY");
+        log(`${fileName} transferred.`);
         document.getElementById('btnModem').disabled = false;
     }
 
-    async function writeToModem() {
-        const targetFiles = ["root_ca.pem", "client_cert.pem", "client_key.pem"];
-        for (let fileName of targetFiles) {
-            log(`Modem: Writing ${fileName}...`);
-            // W Command (Write to Modem)
-            await bleChar.writeValue(new TextEncoder().encode("W" + fileName));
-            await waitAck("MODEM_OK");
-            log(`${fileName} Ready on Modem.`);
-        }
-        log("PROVISIONING FINISHED.");
+    async function writeManual() {
+        const fileName = document.getElementById('fileSelect').value;
+        log(`Modem: Writing ${fileName}...`);
+        await bleChar.writeValue(new TextEncoder().encode("W" + fileName));
+        await waitAck("MODEM_OK");
+        log(`${fileName} provisioned ✅`);
     }
 
     window.onload = async () => {
-        try {
-            const resp = await fetch(document.getElementById('scriptUrl').value + "?action=listAllFolders");
-            const stations = await resp.json();
-            const sel = document.getElementById('stationSelect');
-            sel.innerHTML = '<option value="">-- Select Station --</option>';
-            stations.forEach(s => { 
-                sel.innerHTML += `<option value="${s.id}">${s.name}</option>`; 
-            });
-            log("Drive Folders Loaded.");
-        } catch(e) { 
-            log("Drive Fetch Error."); 
-        }
+        const resp = await fetch(scriptUrl + "?action=listAllFolders");
+        const stations = await resp.json();
+        const sel = document.getElementById('stationSelect');
+        sel.innerHTML = '<option value="">-- Select Folder --</option>';
+        stations.forEach(s => { sel.innerHTML += `<option value="${s.id}">${s.name}</option>`; });
+        log("Ready.");
     };
 </script>
 </body>
