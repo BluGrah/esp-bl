@@ -59,6 +59,7 @@
         } catch(e) { log("BLE Error."); }
     }
 
+    // Helper to wait for ESP32 Handshake
     async function waitAck(val) {
         return new Promise((resolve) => {
             let timer = setInterval(() => {
@@ -73,36 +74,49 @@
 
     async function transferToFlash() {
         const id = document.getElementById('stationSelect').value;
+        if(!id) return log("Error: Select a station");
+        
+        log("Fetching files from Drive...");
         const resp = await fetch(document.getElementById('scriptUrl').value + `?action=getCerts&id=${id}`);
         const certs = await resp.json();
-        const queue = [{d:certs.ca, t:"cacert", i:"caStat"}, {d:certs.cert, t:"clientcert", i:"certStat"}, {d:certs.key, t:"clientkey", i: "keyStat"}];
+        
+        const queue = [
+            {d: certs.ca, t: "cacert", i: "caStat"},
+            {d: certs.cert, t: "clientcert", i: "certStat"},
+            {d: certs.key, t: "clientkey", i: "keyStat"}
+        ];
 
         for (const item of queue) {
-            const raw = atob(item.d.data);
-            log(`File: ${item.t} (${raw.length} bytes)`);
+            if(!item.d) { log(`Error: ${item.t} missing from Drive`); continue; }
             
-            // Send Start
+            const raw = atob(item.d.data);
+            log(`Starting: ${item.t} (${raw.length} bytes)`);
+            
+            // 1. Send START command
             await bleChar.writeValue(new TextEncoder().encode("S" + item.t));
             await waitAck("ACK_S");
 
-            const size = 150;
-            let count = 0;
-            for (let i = 0; i < raw.length; i += size) {
-                const chunk = raw.slice(i, i + size);
+            // 2. Send DATA chunks
+            const chunkSize = 150;
+            let chunkCount = 0;
+            for (let i = 0; i < raw.length; i += chunkSize) {
+                const chunk = raw.slice(i, i + chunkSize);
                 await bleChar.writeValue(new TextEncoder().encode("D" + chunk));
                 await waitAck("ACK_D");
-                count++;
-                if (count % 5 === 0) log(`Chunk ${count} handshaked...`);
+                chunkCount++;
+                if(chunkCount % 5 === 0) log(`${item.t}: Chunk ${chunkCount} OK...`);
             }
 
-            // Send End
+            // 3. Send END command
             await bleChar.writeValue(new TextEncoder().encode("E"));
             await waitAck("FS_READY");
 
+            // 4. Update UI
             document.getElementById(item.i).className = "status success";
             document.getElementById(item.i).innerText = `${item.t}: In Flash ✅`;
-            log(`${item.t} transfer finished.`);
+            log(`${item.t} saved successfully.`);
         }
+        log("Step 1 Complete.");
         document.getElementById('btnModem').disabled = false;
     }
 
@@ -113,13 +127,14 @@
             const sel = document.getElementById('stationSelect');
             sel.innerHTML = '<option value="">-- Select Station --</option>';
             stations.forEach(s => { sel.innerHTML += `<option value="${s.id}">${s.name}</option>`; });
-            log("Stations loaded.");
-        } catch(e) { log("Fetch Error."); }
+            log("Folders loaded.");
+        } catch(e) { log("Drive Fetch Error."); }
     };
 
     async function writeToModem() {
-        for (const type of ["cacert", "clientcert", "clientkey"]) {
-            log(`Writing ${type} to Modem...`);
+        const list = ["cacert", "clientcert", "clientkey"];
+        for (const type of list) {
+            log(`Modem Writing: ${type}...`);
             await bleChar.writeValue(new TextEncoder().encode("W" + type));
             await new Promise(r => setTimeout(r, 9000));
         }
