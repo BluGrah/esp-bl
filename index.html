@@ -1,130 +1,87 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-    <meta charset="UTF-8">
-    <title>Manual Provisioner v2.7</title>
+    <title>BC660K Manual Provisioner</title>
     <style>
-        body { font-family: -apple-system, sans-serif; padding: 20px; background: #f4f4f7; }
-        .card { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); margin-bottom: 20px; }
-        button, select { width: 100%; padding: 14px; margin: 8px 0; border-radius: 8px; border: 1px solid #ddd; font-size: 16px; font-weight: bold; cursor: pointer; }
-        button { background: #007aff; color: white; border: none; }
-        button:disabled { background: #ccc; cursor: not-allowed; }
-        #debug { background: #1c1c1e; color: #32d74b; padding: 15px; border-radius: 8px; height: 250px; overflow-y: auto; font-family: monospace; font-size: 12px; }
-        label { font-size: 14px; color: #666; font-weight: bold; margin-top: 10px; display: block; }
+        body { font-family: sans-serif; padding: 20px; background: #f4f4f7; }
+        .card { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); margin-bottom: 15px; }
+        button, select { width: 100%; padding: 12px; margin: 8px 0; border-radius: 5px; border: 1px solid #ddd; font-size: 16px; }
+        button { background: #007aff; color: white; border: none; font-weight: bold; cursor: pointer; }
+        #debug { background: #1c1c1e; color: #32d74b; padding: 10px; height: 200px; overflow-y: auto; font-family: monospace; font-size: 12px; border-radius: 5px; }
     </style>
 </head>
 <body>
-
-<div class="card">
-    <button onclick="connectBLE()">1. Connect Bluetooth</button>
-</div>
-
-<div class="card">
-    <label>Select Folder:</label>
-    <select id="stationSelect" onchange="loadFilesFromFolder()">
-        <option>Loading folders...</option>
-    </select>
-
-    <label>Select File in Folder:</label>
-    <select id="fileSelect" disabled>
-        <option>Choose a folder first</option>
-    </select>
-    
-    <button id="btnTransfer" disabled onclick="transferManual()">2. Transfer Selected File to ESP</button>
-    <button id="btnModem" disabled onclick="writeManual()" style="background: #28a745;">3. Write Selected File to Modem</button>
-</div>
-
-<div id="debug">Log: Ready.</div>
+    <div class="card"><button onclick="connectBLE()">1. Connect Bluetooth</button></div>
+    <div class="card">
+        <label>Select Folder:</label>
+        <select id="folderSel" onchange="fetchFiles()"><option>-- Select Folder --</option></select>
+        <label>Select File:</label>
+        <select id="fileSel" disabled><option>Select folder first</option></select>
+        <button id="btnT" disabled onclick="doTransfer()">2. Transfer to ESP</button>
+        <button id="btnM" disabled onclick="doModem()" style="background:#28a745">3. Write to Modem</button>
+    </div>
+    <div id="debug">Log: Ready.</div>
 
 <script>
-    let bleChar, bleResponse = null;
-    let driveFileData = null;
+    let bleChar, bleResponse, driveData;
     const S_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
     const C_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
-    const scriptUrl = "https://script.google.com/macros/s/AKfycbw1guunYp2mZ5mEEsAvjMEbbBXs8u0ZoTZaXf6_zFnQceF0BFi3YL09KCuPyDulkTJU/exec";
+    const scriptUrl = "YOUR_APPS_SCRIPT_URL";
 
     function log(m) { const d=document.getElementById('debug'); d.innerHTML+=`<div>> ${m}</div>`; d.scrollTop=d.scrollHeight; }
 
     async function connectBLE() {
-        try {
-            const dev = await navigator.bluetooth.requestDevice({filters:[{services:[S_UUID]}]});
-            const gatt = await dev.gatt.connect();
-            const svc = await gatt.getPrimaryService(S_UUID);
-            bleChar = await svc.getCharacteristic(C_UUID);
-            await bleChar.startNotifications();
-            bleChar.addEventListener('characteristicvaluechanged', (e) => {
-                bleResponse = new TextDecoder().decode(e.target.value);
-            });
-            log("Connected ✅");
-        } catch(e) { log("BLE Error."); }
+        const dev = await navigator.bluetooth.requestDevice({filters:[{services:[S_UUID]}]});
+        const gatt = await dev.gatt.connect();
+        const svc = await gatt.getPrimaryService(S_UUID);
+        bleChar = await svc.getCharacteristic(C_UUID);
+        await bleChar.startNotifications();
+        bleChar.oncharacteristicvaluechanged = (e) => bleResponse = new TextDecoder().decode(e.target.value);
+        log("Connected ✅");
     }
 
-    async function waitAck(val) {
-        return new Promise(resolve => {
-            const timer = setInterval(() => {
-                if(bleResponse === val) { bleResponse = null; clearInterval(timer); resolve(); }
-            }, 10);
-        });
-    }
-
-    // Fetches the files and fills the second dropdown
-    async function loadFilesFromFolder() {
-        const id = document.getElementById('stationSelect').value;
-        if(!id) return;
-        log("Checking Drive files...");
-        const resp = await fetch(scriptUrl + `?action=getCerts&id=${id}`);
-        driveFileData = await resp.json();
-        
-        const fSel = document.getElementById('fileSelect');
-        fSel.innerHTML = '<option value="">-- Choose a File --</option>';
-        
-        // Add filenames from the JSON response to the dropdown
-        Object.keys(driveFileData).forEach(name => {
-            fSel.innerHTML += `<option value="${name}">${name}</option>`;
-        });
-        
-        fSel.disabled = false;
-        document.getElementById('btnTransfer').disabled = false;
+    async function fetchFiles() {
+        const id = document.getElementById('folderSel').value;
+        const resp = await fetch(`${scriptUrl}?action=getCerts&id=${id}`);
+        driveData = await resp.json();
+        const sel = document.getElementById('fileSel');
+        sel.innerHTML = '<option value="">-- Choose File --</option>';
+        Object.keys(driveData).forEach(name => sel.innerHTML += `<option value="${name}">${name}</option>`);
+        sel.disabled = false; document.getElementById('btnT').disabled = false;
         log("File menu updated.");
     }
 
-    async function transferManual() {
-        const fileName = document.getElementById('fileSelect').value;
-        if(!fileName || !driveFileData[fileName]) return log("Select a file.");
-
-        const raw = atob(driveFileData[fileName].data);
-        log(`Streaming: ${fileName} (${raw.length} bytes)`);
-
-        await bleChar.writeValue(new TextEncoder().encode("S" + fileName));
-        await waitAck("ACK_S");
+    async function doTransfer() {
+        const name = document.getElementById('fileSel').value;
+        const raw = atob(driveData[name].data);
+        log(`Transferring ${name}...`);
+        await bleChar.writeValue(new TextEncoder().encode("S" + name));
+        while(bleResponse !== "ACK_S") await new Promise(r => setTimeout(r, 10));
+        bleResponse = null;
 
         const size = 150;
         for (let i = 0; i < raw.length; i += size) {
             await bleChar.writeValue(new TextEncoder().encode("D" + raw.slice(i, i + size)));
-            await waitAck("ACK_D");
+            while(bleResponse !== "ACK_D") await new Promise(r => setTimeout(r, 10));
+            bleResponse = null;
         }
-
         await bleChar.writeValue(new TextEncoder().encode("E"));
-        await waitAck("FS_READY");
-        log(`${fileName} transferred.`);
-        document.getElementById('btnModem').disabled = false;
+        while(bleResponse !== "FS_READY") await new Promise(r => setTimeout(r, 10));
+        log("Saved to ESP ✅"); document.getElementById('btnM').disabled = false;
     }
 
-    async function writeManual() {
-        const fileName = document.getElementById('fileSelect').value;
-        log(`Modem: Writing ${fileName}...`);
-        await bleChar.writeValue(new TextEncoder().encode("W" + fileName));
-        await waitAck("MODEM_OK");
-        log(`${fileName} provisioned ✅`);
+    async function doModem() {
+        const name = document.getElementById('fileSel').value;
+        await bleChar.writeValue(new TextEncoder().encode("W" + name));
+        while(bleResponse !== "MODEM_OK") await new Promise(r => setTimeout(r, 10));
+        log("Modem Provisioned ✅");
     }
 
     window.onload = async () => {
-        const resp = await fetch(scriptUrl + "?action=listAllFolders");
-        const stations = await resp.json();
-        const sel = document.getElementById('stationSelect');
-        sel.innerHTML = '<option value="">-- Select Folder --</option>';
-        stations.forEach(s => { sel.innerHTML += `<option value="${s.id}">${s.name}</option>`; });
-        log("Ready.");
+        const resp = await fetch(`${scriptUrl}?action=listAllFolders`);
+        const folders = await resp.json();
+        const sel = document.getElementById('folderSel');
+        folders.forEach(f => sel.innerHTML += `<option value="${f.id}">${f.name}</option>`);
     };
 </script>
 </body>
