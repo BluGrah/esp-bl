@@ -71,19 +71,29 @@
 
     async function transferToFlash() {
         const id = document.getElementById('stationSelect').value;
+        if(!id) return log("Select a station first.");
+        
+        log("Fetching files from Drive...");
         const resp = await fetch(document.getElementById('scriptUrl').value + `?action=getCerts&id=${id}`);
         const certs = await resp.json();
+        
+        // Correctly Mapping your Drive Filenames to the Provisioning Logic
         const queue = [
-            {d: certs.ca, t: "cacert", i: "caStat", label: "CA"},
-            {d: certs.cert, t: "clientcert", i: "certStat", label: "Cert"},
-            {d: certs.key, t: "clientkey", i: "keyStat", label: "Key"}
+            {data: certs["root_ca.pem"], type: "cacert", domId: "caStat", label: "CA"},
+            {data: certs["client_cert.pem"], type: "clientcert", domId: "certStat", label: "Cert"},
+            {data: certs["client_key.pem"], type: "clientkey", domId: "keyStat", label: "Key"}
         ];
 
         for (const item of queue) {
-            const raw = atob(item.d.data);
-            log(`File: ${item.t} (${raw.length} bytes)`);
+            if(!item.data) { 
+                log(`Error: ${item.type} (filename mapping) missing from Drive`); 
+                continue; 
+            }
             
-            await bleChar.writeValue(new TextEncoder().encode("S" + item.t));
+            const raw = atob(item.data.data);
+            log(`Starting: ${item.type} (${raw.length} bytes)`);
+            
+            await bleChar.writeValue(new TextEncoder().encode("S" + item.type));
             await waitAck("ACK_S");
 
             const size = 150;
@@ -92,15 +102,15 @@
                 await bleChar.writeValue(new TextEncoder().encode("D" + raw.slice(i, i + size)));
                 await waitAck("ACK_D");
                 cCount++;
-                if (cCount % 5 === 0) log(`${item.label}: Chunk ${cCount} OK...`);
+                if (cCount % 5 === 0) log(`${item.label}: Chunk ${cCount} handshaked...`);
             }
 
             await bleChar.writeValue(new TextEncoder().encode("E"));
             await waitAck("FS_READY");
-            document.getElementById(item.i).className = "status success";
-            document.getElementById(item.i).innerText = `${item.label}: In Flash ✅`;
+            document.getElementById(item.domId).className = "status success";
+            document.getElementById(item.domId).innerText = `${item.label}: In Flash ✅`;
         }
-        log("Step 1 Complete. Ready for Step 2.");
+        log("Step 1 Complete. Ready for Modem Write.");
         document.getElementById('btnModem').disabled = false;
     }
 
@@ -114,14 +124,11 @@
         for (const item of sequence) {
             log(`Step 2: Writing ${item.label} to Modem...`);
             await bleChar.writeValue(new TextEncoder().encode("W" + item.t));
-            
-            // Wait for ESP32 to confirm the Modem handshake is finished
             await waitAck("MODEM_OK");
-            
             document.getElementById(item.i).innerText = `${item.label}: Ready on Modem ✅`;
-            log(`${item.label} provisioned successfully.`);
+            log(`${item.label} provisioned.`);
         }
-        log("ALL CERTIFICATES PROVISIONED.");
+        log("ALL CERTIFICATES SUCCESSFUL.");
     }
 
     window.onload = async () => {
