@@ -1,134 +1,94 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>BC660K-GL Sync Provisioner</title>
+    <title>BC660K Provisioner v3</title>
     <style>
-        body { font-family: -apple-system, sans-serif; padding: 20px; background: #f0f2f5; }
-        .card { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 20px; }
-        button, select { width: 100%; padding: 14px; margin: 8px 0; border-radius: 8px; border: 1px solid #ddd; font-size: 16px; font-weight: bold; }
-        button { background: #007aff; color: white; border: none; cursor: pointer; }
+        body { font-family: sans-serif; padding: 20px; background: #f4f4f9; }
+        .card { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        button { width: 100%; padding: 15px; margin: 10px 0; font-weight: bold; border-radius: 5px; border: none; cursor: pointer; }
+        .btn-esp { background: #007aff; color: white; }
+        .btn-modem { background: #34a853; color: white; }
         button:disabled { background: #ccc; }
-        .status { padding: 10px; margin: 5px 0; border-radius: 6px; background: #eee; border-left: 4px solid #999; font-size: 13px; }
-        .success { border-left-color: #28a745; background: #e9f7ef; color: #155724; }
-        .active { border-left-color: #ffc107; background: #fffde7; }
-        #debug { font-family: monospace; font-size: 11px; background: #222; color: #0f0; padding: 10px; border-radius: 5px; height: 140px; overflow-y: auto; }
+        #log { background: #222; color: #0f0; padding: 10px; font-family: monospace; height: 150px; overflow-y: auto; font-size: 12px; border-radius: 5px; }
     </style>
 </head>
 <body>
 
 <div class="card">
-    <h3>1. Connectivity</h3>
-    <input type="hidden" id="scriptUrl" value="https://script.google.com/macros/s/AKfycbw1guunYp2mZ5mEEsAvjMEbbBXs8u0ZoTZaXf6_zFnQceF0BFi3YL09KCuPyDulkTJU/exec">
-    <button id="btnConnect" onclick="connectBLE()">Connect ESP32 Bluetooth</button>
-    <p id="bleStatus" style="text-align:center;">BLE Status: Disconnected</p>
+    <h3>1. Connect</h3>
+    <button onclick="connectBLE()" class="btn-esp">Connect ESP32 Bluetooth</button>
 </div>
 
 <div class="card">
-    <h3>2. Certificates</h3>
-    <select id="stationSelect"><option>Loading folders...</option></select>
-    <button id="btnUpload" disabled onclick="startSync()">Transfer All to Modem</button>
+    <h3>2. Action Menu</h3>
+    <button id="btnESP" disabled onclick="transferToESP()" class="btn-esp">Step 1: Transfer to ESP Buffer</button>
+    <button id="btnModem" disabled onclick="writeToModem()" class="btn-modem">Step 2: Write to Modem NVRAM</button>
 </div>
 
-<div class="card">
-    <h3>3. Progress</h3>
-    <div id="caStat" class="status">CA: Idle</div>
-    <div id="certStat" class="status">Cert: Idle</div>
-    <div id="keyStat" class="status">Key: Idle</div>
-    <button id="btnVerify" disabled onclick="verify()">Verify Storage</button>
-    <div id="debug">System Log: Ready.</div>
-</div>
+<div id="log">System Ready...</div>
 
 <script>
     let bleChar;
-    let transferQueue = [];
-    let qIndex = 0;
-    const S_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
-    const C_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
+    let files = {};
+    const SURL = "https://script.google.com/macros/s/AKfycbw1guunYp2mZ5mEEsAvjMEbbBXs8u0ZoTZaXf6_zFnQceF0BFi3YL09KCuPyDulkTJU/exec";
 
-    function log(m) { const d=document.getElementById('debug'); d.innerHTML+=`<br>> ${m}`; d.scrollTop=d.scrollHeight; }
-
-    window.onload = async () => {
-        try {
-            const resp = await fetch(document.getElementById('scriptUrl').value + "?action=listAllFolders");
-            const stations = await resp.json();
-            const sel = document.getElementById('stationSelect');
-            sel.innerHTML = '<option value="">-- Select Station --</option>';
-            stations.forEach(s => { sel.innerHTML += `<option value="${s.id}">${s.name}</option>`; });
-            document.getElementById('btnUpload').disabled = false;
-        } catch(e) { log("Error loading station list."); }
-    };
+    function log(m) { const l=document.getElementById('log'); l.innerHTML += "> "+m+"<br>"; l.scrollTop=l.scrollHeight; }
 
     async function connectBLE() {
-        try {
-            log("Searching for ESP32...");
-            const dev = await navigator.bluetooth.requestDevice({filters:[{services:[S_UUID]}]});
-            const gatt = await dev.gatt.connect();
-            const svc = await gatt.getPrimaryService(S_UUID);
-            bleChar = await svc.getCharacteristic(C_UUID);
-            
-            // Enable Handshake Notifications
-            await bleChar.startNotifications();
-            bleChar.addEventListener('characteristicvaluechanged', (e) => {
-                let val = new TextDecoder().decode(e.target.value);
-                if(val === "NEXT") {
-                    const finished = transferQueue[qIndex];
-                    document.getElementById(finished.i).className = "status success";
-                    document.getElementById(finished.i).innerText = finished.t + ": SAVED ✅";
-                    log(`Success: ${finished.t} confirmed by modem.`);
-                    qIndex++; 
-                    setTimeout(processQueue, 300); // Small pause for stability
-                }
-            });
-
-            document.getElementById('bleStatus').innerText = "BLE Status: Connected ✅";
-            log("Bluetooth Link Established.");
-        } catch(e) { log("Connection Failed: Ensure Bluetooth is ON."); }
-    }
-
-    async function startSync() {
-        const id = document.getElementById('stationSelect').value;
-        if(!id || !bleChar) return;
+        const dev = await navigator.bluetooth.requestDevice({filters:[{services:["4fafc201-1fb5-459e-8fcc-c5c9c331914b"]}]});
+        const gatt = await dev.gatt.connect();
+        const svc = await gatt.getPrimaryService("4fafc201-1fb5-459e-8fcc-c5c9c331914b");
+        bleChar = await svc.getCharacteristic("beb5483e-36e1-4688-b7f5-ea07361b26a8");
         
-        log("Downloading certificates...");
-        const resp = await fetch(document.getElementById('scriptUrl').value + `?action=getCerts&id=${id}`);
-        const certs = await resp.json();
+        await bleChar.startNotifications();
+        bleChar.addEventListener('characteristicvaluechanged', (e) => {
+            const val = new TextDecoder().decode(e.target.value);
+            log("Status: " + val);
+        });
 
-        transferQueue = [];
-        if(certs.ca) transferQueue.push({d: certs.ca, t: "cacert", i: "caStat"});
-        if(certs.cert) transferQueue.push({d: certs.cert, t: "clientcert", i: "certStat"});
-        if(certs.key) transferQueue.push({d: certs.key, t: "clientkey", i: "keyStat"});
-
-        qIndex = 0;
-        // Initial setup for Modem
-        await bleChar.writeValue(new TextEncoder().encode("AAT+QSSLCFG=0,0,\"seclevel\",2"));
-        setTimeout(processQueue, 500);
+        log("Connected to ESP32.");
+        document.getElementById('btnESP').disabled = false;
+        fetchData();
     }
 
-    async function processQueue() {
-        if(qIndex >= transferQueue.length) {
-            log("FINISHED: All 3 files processed.");
-            document.getElementById('btnVerify').disabled = false;
-            return;
+    async function fetchData() {
+        log("Downloading certificates from Drive...");
+        const res = await fetch(SURL + "?action=getCerts&id=YOUR_STATION_ID"); // Station ID from previous step
+        files = await res.json();
+        log("Certificates ready.");
+    }
+
+    async function transferToESP() {
+        const sequence = [
+            {id: "cacert", data: atob(files.ca.data)},
+            {id: "clientcert", data: atob(files.cert.data)},
+            {id: "clientkey", data: atob(files.key.data)}
+        ];
+
+        for (const file of sequence) {
+            log("Buffering " + file.id + " to ESP...");
+            await bleChar.writeValue(new TextEncoder().encode("S" + file.id));
+            const size = 150;
+            for (let i = 0; i < file.data.length; i += size) {
+                await bleChar.writeValue(new TextEncoder().encode("D" + file.data.slice(i, i + size)));
+                await new Promise(r => setTimeout(r, 60));
+            }
+            await bleChar.writeValue(new TextEncoder().encode("E"));
+            await new Promise(r => setTimeout(r, 500)); 
         }
-        const item = transferQueue[qIndex];
-        document.getElementById(item.i).className = "status active";
-        document.getElementById(item.i).innerText = `Uploading ${item.t}...`;
-        
-        const raw = atob(item.d.data);
-        log(`Sending ${item.t} (${raw.length} bytes)`);
-        
-        await bleChar.writeValue(new TextEncoder().encode("S" + item.t));
-        const size = 150;
-        for (let i = 0; i < raw.length; i += size) {
-            await bleChar.writeValue(new TextEncoder().encode("D" + raw.slice(i, i + size)));
-            await new Promise(r => setTimeout(r, 70)); 
-        }
-        await bleChar.writeValue(new TextEncoder().encode("E"));
+        log("ESP Buffering Complete.");
+        document.getElementById('btnModem').disabled = false;
     }
 
-    function verify() { bleChar.writeValue(new TextEncoder().encode("V")); }
+    async function writeToModem() {
+        const certs = ["cacert", "clientcert", "clientkey"];
+        for (const c of certs) {
+            log("Writing to Modem NVRAM: " + c);
+            await bleChar.writeValue(new TextEncoder().encode("W" + c));
+            await new Promise(r => setTimeout(r, 7000)); // Large delay for modem write
+        }
+        log("Provisioning Finished.");
+    }
 </script>
 </body>
 </html>
