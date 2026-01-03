@@ -9,9 +9,9 @@
         button, select { width: 100%; padding: 14px; margin: 8px 0; border-radius: 8px; border: 1px solid #ddd; font-size: 16px; font-weight: bold; }
         button { background: #007aff; color: white; border: none; cursor: pointer; }
         button:disabled { background: #ccc; }
-        .status { padding: 12px; margin: 5px 0; border-radius: 8px; background: #eee; border-left: 5px solid #999; }
+        .status { padding: 12px; margin: 5px 0; border-radius: 8px; background: #eee; border-left: 5px solid #999; font-size: 13px; }
         .success { border-left-color: #28a745; background: #e9f7ef; color: #155724; font-weight: bold; }
-        #debug { font-family: monospace; font-size: 11px; background: #1a1a1a; color: #32d74b; padding: 15px; border-radius: 8px; height: 200px; overflow-y: auto; }
+        #debug { font-family: monospace; font-size: 11px; background: #1a1a1a; color: #32d74b; padding: 15px; border-radius: 8px; height: 220px; overflow-y: auto; }
     </style>
 </head>
 <body>
@@ -23,14 +23,14 @@
 <div class="card">
     <h3>2. Action Menu</h3>
     <select id="stationSelect"><option>Loading folders...</option></select>
-    <button id="btnESP" disabled onclick="transferToFlash()">Step 1: Transfer to ESP Flash</button>
+    <button id="btnESP" disabled onclick="transferToFlash()">Step 1: Transfer ALL to ESP Flash</button>
     <button id="btnModem" disabled onclick="writeToModem()" style="background: #28a745;">Step 2: Write to Modem</button>
 </div>
 <div class="card">
     <h3>3. Progress</h3>
-    <div id="caStat" class="status">CA: Waiting...</div>
-    <div id="certStat" class="status">Cert: Waiting...</div>
-    <div id="keyStat" class="status">Key: Waiting...</div>
+    <div id="caStat" class="status">CA (root_ca.pem): Waiting...</div>
+    <div id="certStat" class="status">Cert (client_cert.pem): Waiting...</div>
+    <div id="keyStat" class="status">Key (client_key.pem): Waiting...</div>
     <div id="debug">Log: Ready.</div>
 </div>
 
@@ -71,13 +71,11 @@
 
     async function transferToFlash() {
         const id = document.getElementById('stationSelect').value;
-        if(!id) return log("Select a station first.");
-        
-        log("Fetching files from Drive...");
+        log("Fetching all 3 files from Drive...");
         const resp = await fetch(document.getElementById('scriptUrl').value + `?action=getCerts&id=${id}`);
         const certs = await resp.json();
         
-        // Correctly Mapping your Drive Filenames to the Provisioning Logic
+        // Define the sequence clearly
         const queue = [
             {data: certs["root_ca.pem"], type: "cacert", domId: "caStat", label: "CA"},
             {data: certs["client_cert.pem"], type: "clientcert", domId: "certStat", label: "Cert"},
@@ -85,32 +83,36 @@
         ];
 
         for (const item of queue) {
-            if(!item.data) { 
-                log(`Error: ${item.type} (filename mapping) missing from Drive`); 
-                continue; 
-            }
+            if(!item.data) { log(`ERR: ${item.label} not found!`); continue; }
             
             const raw = atob(item.data.data);
-            log(`Starting: ${item.type} (${raw.length} bytes)`);
+            log(`Transferring ${item.label}: ${raw.length} bytes...`);
             
+            // Start Transfer
             await bleChar.writeValue(new TextEncoder().encode("S" + item.type));
             await waitAck("ACK_S");
 
-            const size = 150;
+            const chunkSize = 150;
             let cCount = 0;
-            for (let i = 0; i < raw.length; i += size) {
-                await bleChar.writeValue(new TextEncoder().encode("D" + raw.slice(i, i + size)));
+            for (let i = 0; i < raw.length; i += chunkSize) {
+                const chunk = raw.slice(i, i + chunkSize);
+                await bleChar.writeValue(new TextEncoder().encode("D" + chunk));
                 await waitAck("ACK_D");
                 cCount++;
-                if (cCount % 5 === 0) log(`${item.label}: Chunk ${cCount} handshaked...`);
+                if (cCount % 5 === 0) log(`${item.label}: Chunk ${cCount} handshaked.`);
             }
 
+            // End Transfer
             await bleChar.writeValue(new TextEncoder().encode("E"));
             await waitAck("FS_READY");
+            
             document.getElementById(item.domId).className = "status success";
             document.getElementById(item.domId).innerText = `${item.label}: In Flash ✅`;
+            log(`${item.label} finished and confirmed.`);
         }
-        log("Step 1 Complete. Ready for Modem Write.");
+
+        log("Step 1 Complete. Files are safe in ESP Flash.");
+        log("AWAITING BUTTON PRESS FOR MODEM WRITE...");
         document.getElementById('btnModem').disabled = false;
     }
 
@@ -122,13 +124,16 @@
         ];
         
         for (const item of sequence) {
-            log(`Step 2: Writing ${item.label} to Modem...`);
+            log(`Step 2: Sending ${item.label} to Modem...`);
             await bleChar.writeValue(new TextEncoder().encode("W" + item.t));
+            
+            // Wait for ESP to finish AT commands and notify back
             await waitAck("MODEM_OK");
+            
             document.getElementById(item.i).innerText = `${item.label}: Ready on Modem ✅`;
-            log(`${item.label} provisioned.`);
+            log(`${item.label} Modem Write OK.`);
         }
-        log("ALL CERTIFICATES SUCCESSFUL.");
+        log("SYSTEM PROVISIONED SUCCESSFULLY.");
     }
 
     window.onload = async () => {
