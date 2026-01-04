@@ -57,23 +57,45 @@
     }
 
     async function doTransfer() {
-        const name = document.getElementById('fileSel').value;
-        const raw = atob(driveData[name].data);
-        log(`Transferring ${name}...`);
-        await bleChar.writeValue(new TextEncoder().encode("S" + name));
-        while(bleResponse !== "ACK_S") await new Promise(r => setTimeout(r, 50));
-        bleResponse = null;
+    const name = document.getElementById('fileSel').value;
+    if(!name || !driveData[name]) return;
+    
+    const raw = atob(driveData[name].data);
+    log(`Initiating stream: ${name} (${raw.length} bytes)`);
+    
+    // 1. Send START command
+    bleResponse = null; 
+    await bleChar.writeValue(new TextEncoder().encode("S" + name));
+    log("Waiting for Start ACK...");
+    while(bleResponse !== "ACK_S") await new Promise(r => setTimeout(r, 50));
 
-        const size = 150;
-        for (let i = 0; i < raw.length; i += size) {
-            await bleChar.writeValue(new TextEncoder().encode("D" + raw.slice(i, i + size)));
-            while(bleResponse !== "ACK_D") await new Promise(r => setTimeout(r, 20));
-            bleResponse = null;
+    // 2. Send DATA in chunks with acknowledgement
+    const chunkSize = 150; 
+    for (let i = 0; i < raw.length; i += chunkSize) {
+        const chunk = raw.slice(i, i + chunkSize);
+        bleResponse = null; // Clear response before sending
+        
+        await bleChar.writeValue(new TextEncoder().encode("D" + chunk));
+        
+        // WAIT for the device to say "ACK_D"
+        let timeout = 0;
+        while(bleResponse !== "ACK_D") {
+            await new Promise(r => setTimeout(r, 10));
+            timeout++;
+            if(timeout > 200) throw new Error("Device stopped responding during data transfer");
         }
-        await bleChar.writeValue(new TextEncoder().encode("E"));
-        while(bleResponse !== "FS_READY") await new Promise(r => setTimeout(r, 50));
-        log("Saved to ESP ✅"); document.getElementById('btnM').disabled = false;
+        
+        if(i % 450 === 0) log(`Progress: ${i}/${raw.length} bytes...`);
     }
+
+    // 3. Send END command
+    bleResponse = null;
+    await bleChar.writeValue(new TextEncoder().encode("E"));
+    while(bleResponse !== "FS_READY") await new Promise(r => setTimeout(r, 50));
+    
+    log(`Success: ${name} saved to ESP (${raw.length} bytes).`, "success");
+    document.getElementById('btnModem').disabled = false;
+}
 
     async function doModem() {
         const name = document.getElementById('fileSel').value;
