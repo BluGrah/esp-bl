@@ -1,24 +1,30 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>BC660K Provisioner</title>
+    <title>BC660K Provisioner v3.0</title>
     <style>
         body { font-family: sans-serif; padding: 20px; background: #f4f4f7; }
         .card { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); margin-bottom: 15px; }
-        button, select { width: 100%; padding: 12px; margin: 8px 0; border-radius: 5px; border: 1px solid #ddd; font-size: 16px; }
+        button, select { width: 100%; padding: 12px; margin: 8px 0; border-radius: 8px; border: 1px solid #ddd; font-size: 16px; }
         button { background: #007aff; color: white; border: none; font-weight: bold; cursor: pointer; }
-        #debug { background: #1c1c1e; color: #32d74b; padding: 10px; height: 200px; overflow-y: auto; font-family: monospace; font-size: 12px; border-radius: 5px; }
+        button:disabled { background: #ccc; }
+        #debug { background: #1c1c1e; color: #32d74b; padding: 10px; height: 250px; overflow-y: auto; font-family: monospace; font-size: 12px; border-radius: 5px; }
+        .err { color: #ff453a; }
     </style>
 </head>
 <body>
-    <div class="card"><button onclick="connectBLE()">1. Connect Bluetooth</button></div>
     <div class="card">
-        <label>Select Folder:</label>
+        <button id="btnConnect" onclick="connectBLE()">1. Connect Bluetooth</button>
+    </div>
+    <div class="card">
+        <label>Select Station Folder:</label>
         <select id="folderSel" onchange="fetchFiles()"><option value="">-- Loading --</option></select>
-        <label>Select File:</label>
+        
+        <label>Select Certificate File:</label>
         <select id="fileSel" disabled><option>Select folder first</option></select>
-        <button id="btnT" disabled onclick="doTransfer()">2. Transfer to ESP</button>
-        <button id="btnM" disabled onclick="doModem()" style="background:#28a745">3. Write to Modem</button>
+        
+        <button id="btnTransfer" disabled onclick="doTransfer()">2. Upload to ESP Flash</button>
+        <button id="btnModem" disabled onclick="doModem()" style="background:#28a745">3. Provision to BC660K</button>
     </div>
     <div id="debug">Log: Initializing...</div>
 
@@ -26,82 +32,100 @@
     let bleChar, bleResponse, driveData;
     const S_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
     const C_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
-    
-    // PASTE YOUR NEW DEPLOYMENT URL HERE
-    const scriptUrl = "https://script.google.com/macros/s/AKfycbzvAinYxfH2FNcAOWUXedNnKyIR-f2rKToYzLOF4d5J-5HhN9FOy4rLmHQ2w92Mr7EK/exec";
+    const scriptUrl = "YOUR_APPS_SCRIPT_URL_HERE"; 
 
-    function log(m) { const d=document.getElementById('debug'); d.innerHTML+=`<div>> ${m}</div>`; d.scrollTop=d.scrollHeight; }
+    function log(m, isErr=false) { 
+        const d = document.getElementById('debug'); 
+        d.innerHTML += `<div class="${isErr?'err':''}">> ${m}</div>`; 
+        d.scrollTop = d.scrollHeight; 
+    }
 
     async function connectBLE() {
         try {
+            log("Requesting Device...");
             const dev = await navigator.bluetooth.requestDevice({filters:[{services:[S_UUID]}]});
             const gatt = await dev.gatt.connect();
             const svc = await gatt.getPrimaryService(S_UUID);
             bleChar = await svc.getCharacteristic(C_UUID);
             await bleChar.startNotifications();
-            bleChar.oncharacteristicvaluechanged = (e) => bleResponse = new TextDecoder().decode(e.target.value);
-            log("Connected ✅");
-        } catch(e) { log("BLE Error: " + e); }
+            bleChar.oncharacteristicvaluechanged = (e) => {
+                bleResponse = new TextDecoder().decode(e.target.value);
+                console.log("BLE Notify:", bleResponse);
+            };
+            log("Connected to ESP32 ✅");
+            document.getElementById('btnConnect').innerText = "Connected: " + dev.name;
+        } catch(e) { log("BLE Error: " + e, true); }
     }
 
     async function fetchFiles() {
         const id = document.getElementById('folderSel').value;
         if(!id) return;
-        log("Fetching files...");
+        log("Fetching Drive files...");
         const resp = await fetch(`${scriptUrl}?action=getCerts&id=${id}`);
         driveData = await resp.json();
         const sel = document.getElementById('fileSel');
         sel.innerHTML = '<option value="">-- Choose File --</option>';
         Object.keys(driveData).forEach(name => sel.innerHTML += `<option value="${name}">${name}</option>`);
-        sel.disabled = false; document.getElementById('btnT').disabled = false;
+        sel.disabled = false;
+        document.getElementById('btnTransfer').disabled = false;
+        log("Files ready.");
     }
 
     async function doTransfer() {
-    const name = document.getElementById('fileSel').value;
-    if(!name || !driveData[name]) return;
-    
-    const raw = atob(driveData[name].data);
-    log(`Initiating stream: ${name} (${raw.length} bytes)`);
-    
-    // 1. Send START command
-    bleResponse = null; 
-    await bleChar.writeValue(new TextEncoder().encode("S" + name));
-    log("Waiting for Start ACK...");
-    while(bleResponse !== "ACK_S") await new Promise(r => setTimeout(r, 50));
+        const name = document.getElementById('fileSel').value;
+        const raw = atob(driveData[name].data);
+        log(`Starting transfer: ${name}...`);
+        
+        bleResponse = null;
+        await bleChar.writeValue(new TextEncoder().encode("S" + name));
+        while(bleResponse !== "ACK_S") await new Promise(r => setTimeout(r, 50));
 
-    // 2. Send DATA in chunks with acknowledgement
-    const chunkSize = 150; 
-    for (let i = 0; i < raw.length; i += chunkSize) {
-        const chunk = raw.slice(i, i + chunkSize);
-        bleResponse = null; // Clear response before sending
-        
-        await bleChar.writeValue(new TextEncoder().encode("D" + chunk));
-        
-        // WAIT for the device to say "ACK_D"
-        let timeout = 0;
-        while(bleResponse !== "ACK_D") {
-            await new Promise(r => setTimeout(r, 10));
-            timeout++;
-            if(timeout > 200) throw new Error("Device stopped responding during data transfer");
+        const size = 150;
+        for (let i = 0; i < raw.length; i += size) {
+            bleResponse = null;
+            await bleChar.writeValue(new TextEncoder().encode("D" + raw.slice(i, i + size)));
+            while(bleResponse !== "ACK_D") await new Promise(r => setTimeout(r, 20));
         }
         
-        if(i % 450 === 0) log(`Progress: ${i}/${raw.length} bytes...`);
+        bleResponse = null;
+        await bleChar.writeValue(new TextEncoder().encode("E"));
+        while(bleResponse !== "FS_READY") await new Promise(r => setTimeout(r, 50));
+        
+        log("File saved to ESP LittleFS ✅");
+        document.getElementById('btnModem').disabled = false;
     }
-
-    // 3. Send END command
-    bleResponse = null;
-    await bleChar.writeValue(new TextEncoder().encode("E"));
-    while(bleResponse !== "FS_READY") await new Promise(r => setTimeout(r, 50));
-    
-    log(`Success: ${name} saved to ESP (${raw.length} bytes).`, "success");
-    document.getElementById('btnModem').disabled = false;
-}
 
     async function doModem() {
         const name = document.getElementById('fileSel').value;
-        await bleChar.writeValue(new TextEncoder().encode("W" + name));
-        while(bleResponse !== "MODEM_OK" && bleResponse !== "MODEM_FAIL") await new Promise(r => setTimeout(r, 50));
-        log("Modem Result: " + bleResponse);
+        if(!name) return;
+        
+        log(`CRITICAL: Sending Write Command 'W' for ${name}...`);
+        bleResponse = null;
+        
+        try {
+            // This sends the "W" command + the filename to the ESP32
+            await bleChar.writeValue(new TextEncoder().encode("W" + name));
+            log("Command sent. Waiting for Modem response...");
+            
+            // Wait for ESP32 to finish the AT sequence and notify us
+            let timeout = 0;
+            while(bleResponse !== "MODEM_OK" && bleResponse !== "MODEM_FAIL") {
+                await new Promise(r => setTimeout(r, 100));
+                timeout++;
+                if(timeout > 200) { // 20 second timeout
+                    log("Error: Modem operation timed out.", true);
+                    return;
+                }
+            }
+            
+            if(bleResponse === "MODEM_OK") {
+                log("MODEM SUCCESS: Certificate stored! ✅");
+            } else {
+                log("MODEM ERROR: Check ESP32 Serial Logs.", true);
+            }
+        } catch(e) {
+            log("Write Error: " + e, true);
+        }
         bleResponse = null;
     }
 
@@ -112,8 +136,8 @@
             const sel = document.getElementById('folderSel');
             sel.innerHTML = '<option value="">-- Select Folder --</option>';
             folders.forEach(f => sel.innerHTML += `<option value="${f.id}">${f.name}</option>`);
-            log("Folders loaded.");
-        } catch(e) { log("Load Error. Check Script Deployment Access (set to 'Anyone')."); }
+            log("Stations loaded from Drive.");
+        } catch(e) { log("Google Drive Error: Check URL/Permissions.", true); }
     };
 </script>
 </body>
