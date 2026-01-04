@@ -1,30 +1,25 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>BC660K Provisioner v3.0</title>
+    <title>Azure IoT BC660K Provisioner</title>
     <style>
         body { font-family: sans-serif; padding: 20px; background: #f4f4f7; }
         .card { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); margin-bottom: 15px; }
         button, select { width: 100%; padding: 12px; margin: 8px 0; border-radius: 8px; border: 1px solid #ddd; font-size: 16px; }
         button { background: #007aff; color: white; border: none; font-weight: bold; cursor: pointer; }
-        button:disabled { background: #ccc; }
-        #debug { background: #1c1c1e; color: #32d74b; padding: 10px; height: 250px; overflow-y: auto; font-family: monospace; font-size: 12px; border-radius: 5px; }
-        .err { color: #ff453a; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+        #debug { background: #1c1c1e; color: #32d74b; padding: 10px; height: 350px; overflow-y: auto; font-family: monospace; font-size: 12px; border-radius: 5px; border: 1px solid #333; }
+        .status-ok { color: #32d74b; }
+        .status-err { color: #ff453a; font-weight: bold; }
     </style>
 </head>
 <body>
-    <div class="card">
-        <button id="btnConnect" onclick="connectBLE()">1. Connect Bluetooth</button>
-    </div>
+    <div class="card"><button id="btnConnect" onclick="connectBLE()">1. Connect ESP32</button></div>
     <div class="card">
         <label>Select Station Folder:</label>
-        <select id="folderSel" onchange="fetchFiles()"><option value="">-- Loading --</option></select>
-        
-        <label>Select Certificate File:</label>
-        <select id="fileSel" disabled><option>Select folder first</option></select>
-        
-        <button id="btnTransfer" disabled onclick="doTransfer()">2. Upload to ESP Flash</button>
-        <button id="btnModem" disabled onclick="doModem()" style="background:#28a745">3. Provision to BC660K</button>
+        <select id="folderSel" onchange="fetchFiles()"><option value="">-- Select --</option></select>
+        <div id="fileCheck" style="margin: 10px 0; font-size: 13px;"></div>
+        <button id="btnSequence" disabled onclick="doFullProvisioning()" style="background:#28a745">2. Start Azure Provisioning Sequence</button>
     </div>
     <div id="debug">Log: Initializing...</div>
 
@@ -32,17 +27,16 @@
     let bleChar, bleResponse, driveData;
     const S_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
     const C_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
-    const scriptUrl = "https://script.google.com/macros/s/AKfycbzvAinYxfH2FNcAOWUXedNnKyIR-f2rKToYzLOF4d5J-5HhN9FOy4rLmHQ2w92Mr7EK/exec"; 
+    const scriptUrl = "YOUR_APPS_SCRIPT_URL"; // REPLACE WITH YOUR /exec URL
 
     function log(m, isErr=false) { 
         const d = document.getElementById('debug'); 
-        d.innerHTML += `<div class="${isErr?'err':''}">> ${m}</div>`; 
+        d.innerHTML += `<div class="${isErr?'status-err':''}">> ${m}</div>`; 
         d.scrollTop = d.scrollHeight; 
     }
 
     async function connectBLE() {
         try {
-            log("Requesting Device...");
             const dev = await navigator.bluetooth.requestDevice({filters:[{services:[S_UUID]}]});
             const gatt = await dev.gatt.connect();
             const svc = await gatt.getPrimaryService(S_UUID);
@@ -50,111 +44,89 @@
             await bleChar.startNotifications();
             bleChar.oncharacteristicvaluechanged = (e) => {
                 bleResponse = new TextDecoder().decode(e.target.value);
-                console.log("BLE Notify:", bleResponse);
             };
             log("Connected to ESP32 ✅");
-            document.getElementById('btnConnect').innerText = "Connected: " + dev.name;
+            document.getElementById('btnConnect').innerText = "Connected";
         } catch(e) { log("BLE Error: " + e, true); }
     }
 
     async function fetchFiles() {
         const id = document.getElementById('folderSel').value;
         if(!id) return;
-        log("Fetching Drive files...");
-        const resp = await fetch(`${scriptUrl}?action=getCerts&id=${id}`);
-        driveData = await resp.json();
-        const sel = document.getElementById('fileSel');
-        sel.innerHTML = '<option value="">-- Choose File --</option>';
-        Object.keys(driveData).forEach(name => sel.innerHTML += `<option value="${name}">${name}</option>`);
-        sel.disabled = false;
-        document.getElementById('btnTransfer').disabled = false;
-        log("Files ready.");
-    }
+        log("Checking folder content...");
+        try {
+            const resp = await fetch(`${scriptUrl}?action=getCerts&id=${id}`);
+            driveData = await resp.json();
+            
+            const hasCA = driveData["root_ca.pem"];
+            const hasCert = driveData["client_cert.pem"];
+            const hasKey = driveData["client_key.pem"];
 
-    async function doTransfer() {
-        const name = document.getElementById('fileSel').value;
-        const raw = atob(driveData[name].data);
-        log(`Starting transfer: ${name}...`);
-        
-        bleResponse = null;
-        await bleChar.writeValue(new TextEncoder().encode("S" + name));
-        while(bleResponse !== "ACK_S") await new Promise(r => setTimeout(r, 50));
+            let html = "<b>Required Files:</b><br>";
+            html += (hasCA ? "✅" : "❌") + " root_ca.pem<br>";
+            html += (hasCert ? "✅" : "❌") + " client_cert.pem<br>";
+            html += (hasKey ? "✅" : "❌") + " client_key.pem";
+            document.getElementById('fileCheck').innerHTML = html;
 
-        const size = 150;
-        for (let i = 0; i < raw.length; i += size) {
-            bleResponse = null;
-            await bleChar.writeValue(new TextEncoder().encode("D" + raw.slice(i, i + size)));
-            while(bleResponse !== "ACK_D") await new Promise(r => setTimeout(r, 20));
-        }
-        
-        bleResponse = null;
-        await bleChar.writeValue(new TextEncoder().encode("E"));
-        while(bleResponse !== "FS_READY") await new Promise(r => setTimeout(r, 50));
-        
-        log("File saved to ESP LittleFS ✅");
-        document.getElementById('btnModem').disabled = false;
-    }
-
-    async function doModem() {
-    // 1. Immediate feedback to prove the button works
-    console.log("Button clicked: doModem"); 
-    log("UI: 'Provision' button pressed.");
-
-    const sel = document.getElementById('fileSel');
-    const name = sel.value;
-
-    if(!name) {
-        log("UI Error: No file selected in dropdown.", true);
-        return;
-    }
-    
-    if(!bleChar) {
-        log("UI Error: Bluetooth not connected.", true);
-        return;
-    }
-
-    try {
-        log(`BLE: Sending command 'W${name}'...`);
-        bleResponse = null;
-        
-        // Convert string to Uint8Array for maximum compatibility
-        const encoder = new TextEncoder();
-        const data = encoder.encode("W" + name);
-        
-        await bleChar.writeValue(data);
-        log("BLE: Data sent to ESP32. Waiting for Modem response...");
-        
-        // Wait for notification
-        let attempts = 0;
-        while(bleResponse !== "MODEM_OK" && bleResponse !== "MODEM_FAIL") {
-            await new Promise(r => setTimeout(r, 200));
-            attempts++;
-            if(attempts > 100) { // 20 second timeout
-                log("Timeout: No response from ESP32.", true);
-                break;
+            if(hasCA && hasCert && hasKey) {
+                document.getElementById('btnSequence').disabled = false;
+                log("All files present. Ready to provision.");
+            } else {
+                log("Error: Missing specific filenames.", true);
             }
-        }
-        
-        if(bleResponse === "MODEM_OK") {
-            log("SUCCESS: Modem accepted certificate! ✅");
-        } else if(bleResponse === "MODEM_FAIL") {
-            log("FAIL: Modem rejected certificate. Check ESP Serial.", true);
-        }
-    } catch(e) {
-        log("JS Error: " + e.message, true);
-        console.error(e);
+        } catch(e) { log("Fetch failed. Check Script URL.", true); }
     }
-}
+
+    async function doFullProvisioning() {
+        const sequence = ["root_ca.pem", "client_cert.pem", "client_key.pem"];
+        log("<b>Starting Sequence...</b>");
+
+        try {
+            for (const fileName of sequence) {
+                log(`<b>Processing ${fileName}...</b>`);
+                
+                // 1. Send to ESP
+                const raw = atob(driveData[fileName].data);
+                bleResponse = null;
+                await bleChar.writeValue(new TextEncoder().encode("S" + fileName));
+                while(bleResponse !== "ACK_S") await new Promise(r => setTimeout(r, 50));
+
+                const chunkSize = 150;
+                for (let i = 0; i < raw.length; i += chunkSize) {
+                    const chunk = raw.slice(i, i + chunkSize);
+                    bleResponse = null;
+                    await bleChar.writeValue(new TextEncoder().encode("D" + chunk));
+                    while(bleResponse !== "ACK_D") await new Promise(r => setTimeout(r, 20));
+                }
+
+                bleResponse = null;
+                await bleChar.writeValue(new TextEncoder().encode("E"));
+                while(bleResponse !== "FS_READY") await new Promise(r => setTimeout(r, 50));
+                log(`- ${fileName} saved to ESP.`);
+
+                // 2. Provision to Modem
+                bleResponse = null;
+                await bleChar.writeValue(new TextEncoder().encode("W" + fileName));
+                let timeout = 0;
+                while(bleResponse !== "MODEM_OK") {
+                    await new Promise(r => setTimeout(r, 250));
+                    if(bleResponse === "MODEM_FAIL") throw new Error("Modem rejected " + fileName);
+                    if(timeout++ > 100) throw new Error("Modem Timeout");
+                }
+                log(`- ${fileName} stored in BC660K ✅`);
+            }
+            log("<b>PROVISIONING COMPLETE!</b> ✅✅✅");
+        } catch(e) { log("ERROR: " + e.message, true); }
+    }
 
     window.onload = async () => {
         try {
             const resp = await fetch(`${scriptUrl}?action=listAllFolders`);
             const folders = await resp.json();
             const sel = document.getElementById('folderSel');
-            sel.innerHTML = '<option value="">-- Select Folder --</option>';
             folders.forEach(f => sel.innerHTML += `<option value="${f.id}">${f.name}</option>`);
-            log("Stations loaded from Drive.");
-        } catch(e) { log("Google Drive Error: Check URL/Permissions.", true); }
+            log("Folders loaded.");
+        } catch(e) { log("Script Connection Failed.", true); }
     };
 </script>
 </body>
