@@ -96,38 +96,55 @@
     }
 
     async function doModem() {
-        const name = document.getElementById('fileSel').value;
-        if(!name) return;
-        
-        log(`CRITICAL: Sending Write Command 'W' for ${name}...`);
-        bleResponse = null;
-        
-        try {
-            // This sends the "W" command + the filename to the ESP32
-            await bleChar.writeValue(new TextEncoder().encode("W" + name));
-            log("Command sent. Waiting for Modem response...");
-            
-            // Wait for ESP32 to finish the AT sequence and notify us
-            let timeout = 0;
-            while(bleResponse !== "MODEM_OK" && bleResponse !== "MODEM_FAIL") {
-                await new Promise(r => setTimeout(r, 100));
-                timeout++;
-                if(timeout > 200) { // 20 second timeout
-                    log("Error: Modem operation timed out.", true);
-                    return;
-                }
-            }
-            
-            if(bleResponse === "MODEM_OK") {
-                log("MODEM SUCCESS: Certificate stored! ✅");
-            } else {
-                log("MODEM ERROR: Check ESP32 Serial Logs.", true);
-            }
-        } catch(e) {
-            log("Write Error: " + e, true);
-        }
-        bleResponse = null;
+    // 1. Immediate feedback to prove the button works
+    console.log("Button clicked: doModem"); 
+    log("UI: 'Provision' button pressed.");
+
+    const sel = document.getElementById('fileSel');
+    const name = sel.value;
+
+    if(!name) {
+        log("UI Error: No file selected in dropdown.", true);
+        return;
     }
+    
+    if(!bleChar) {
+        log("UI Error: Bluetooth not connected.", true);
+        return;
+    }
+
+    try {
+        log(`BLE: Sending command 'W${name}'...`);
+        bleResponse = null;
+        
+        // Convert string to Uint8Array for maximum compatibility
+        const encoder = new TextEncoder();
+        const data = encoder.encode("W" + name);
+        
+        await bleChar.writeValue(data);
+        log("BLE: Data sent to ESP32. Waiting for Modem response...");
+        
+        // Wait for notification
+        let attempts = 0;
+        while(bleResponse !== "MODEM_OK" && bleResponse !== "MODEM_FAIL") {
+            await new Promise(r => setTimeout(r, 200));
+            attempts++;
+            if(attempts > 100) { // 20 second timeout
+                log("Timeout: No response from ESP32.", true);
+                break;
+            }
+        }
+        
+        if(bleResponse === "MODEM_OK") {
+            log("SUCCESS: Modem accepted certificate! ✅");
+        } else if(bleResponse === "MODEM_FAIL") {
+            log("FAIL: Modem rejected certificate. Check ESP Serial.", true);
+        }
+    } catch(e) {
+        log("JS Error: " + e.message, true);
+        console.error(e);
+    }
+}
 
     window.onload = async () => {
         try {
