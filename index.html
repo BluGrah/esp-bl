@@ -14,20 +14,28 @@
     </style>
 </head>
 <body>
-    <div class="card"><button id="btnConnect" onclick="connectBLE()">1. Connect ESP32</button></div>
+    <div class="card">
+        <button id="btnConnect" onclick="connectBLE()">1. Connect to ESP32</button>
+    </div>
+
     <div class="card">
         <label>Select Station Folder:</label>
-        <select id="folderSel" onchange="fetchFiles()"><option value="">-- Select --</option></select>
+        <select id="folderSel" onchange="fetchFiles()"><option value="">-- Select Folder --</option></select>
         <div id="fileCheck" style="margin: 10px 0; font-size: 13px;"></div>
-        <button id="btnSequence" disabled onclick="doFullProvisioning()" style="background:#28a745">2. Start Azure Provisioning Sequence</button>
+        
+        <button id="btnTransfer" disabled onclick="doFullTransfer()">2. Transfer All to ESP32</button>
+        <button id="btnModem" disabled onclick="doFullModemWrite()" style="background:#28a745">3. Write All to Modem</button>
     </div>
+
     <div id="debug">Log: Initializing...</div>
 
 <script>
     let bleChar, bleResponse, driveData;
     const S_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
     const C_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
-    const scriptUrl = "https://script.google.com/macros/s/AKfycbzvAinYxfH2FNcAOWUXedNnKyIR-f2rKToYzLOF4d5J-5HhN9FOy4rLmHQ2w92Mr7EK/exec"; // REPLACE WITH YOUR /exec URL
+    const scriptUrl = "https://script.google.com/macros/s/AKfycbzvAinYxfH2FNcAOWUXedNnKyIR-f2rKToYzLOF4d5J-5HhN9FOy4rLmHQ2w92Mr7EK/exec"; // PASTE YOUR /exec URL HERE
+
+    const requiredFiles = ["root_ca.pem", "client_cert.pem", "client_key.pem"];
 
     function log(m, isErr=false) { 
         const d = document.getElementById('debug'); 
@@ -53,44 +61,44 @@
     async function fetchFiles() {
         const id = document.getElementById('folderSel').value;
         if(!id) return;
-        log("Checking folder content...");
+        log("Fetching folder contents...");
         try {
             const resp = await fetch(`${scriptUrl}?action=getCerts&id=${id}`);
             driveData = await resp.json();
             
-            const hasCA = driveData["root_ca.pem"];
-            const hasCert = driveData["client_cert.pem"];
-            const hasKey = driveData["client_key.pem"];
+            let html = "<b>Required Files Check:</b><br>";
+            let allPresent = true;
 
-            let html = "<b>Required Files:</b><br>";
-            html += (hasCA ? "✅" : "❌") + " root_ca.pem<br>";
-            html += (hasCert ? "✅" : "❌") + " client_cert.pem<br>";
-            html += (hasKey ? "✅" : "❌") + " client_key.pem";
+            requiredFiles.forEach(file => {
+                if (driveData[file]) {
+                    html += `<span class="status-ok">✅ ${file}</span><br>`;
+                } else {
+                    html += `<span class="status-err">❌ ${file} (Missing)</span><br>`;
+                    allPresent = false;
+                }
+            });
+
             document.getElementById('fileCheck').innerHTML = html;
-
-            if(hasCA && hasCert && hasKey) {
-                document.getElementById('btnSequence').disabled = false;
-                log("All files present. Ready to provision.");
-            } else {
-                log("Error: Missing specific filenames.", true);
-            }
-        } catch(e) { log("Fetch failed. Check Script URL.", true); }
+            document.getElementById('btnTransfer').disabled = !allPresent;
+            
+            if(allPresent) log("All Azure IoT files found. Ready for Transfer.");
+        } catch(e) { log("Fetch failed. Check Apps Script URL.", true); }
     }
 
-    async function doFullProvisioning() {
-        const sequence = ["root_ca.pem", "client_cert.pem", "client_key.pem"];
-        log("<b>Starting Sequence...</b>");
-
+    // BUTTON 2: Transfer all in order
+    async function doFullTransfer() {
+        log("<b>Starting Transfer to ESP32 Flash...</b>");
         try {
-            for (const fileName of sequence) {
-                log(`<b>Processing ${fileName}...</b>`);
-                
-                // 1. Send to ESP
+            for (const fileName of requiredFiles) {
+                log(`Transferring: ${fileName}`);
                 const raw = atob(driveData[fileName].data);
+                
+                // Start
                 bleResponse = null;
                 await bleChar.writeValue(new TextEncoder().encode("S" + fileName));
                 while(bleResponse !== "ACK_S") await new Promise(r => setTimeout(r, 50));
 
+                // Chunked Data (150 bytes per BLE packet)
                 const chunkSize = 150;
                 for (let i = 0; i < raw.length; i += chunkSize) {
                     const chunk = raw.slice(i, i + chunkSize);
@@ -99,24 +107,36 @@
                     while(bleResponse !== "ACK_D") await new Promise(r => setTimeout(r, 20));
                 }
 
+                // End
                 bleResponse = null;
                 await bleChar.writeValue(new TextEncoder().encode("E"));
                 while(bleResponse !== "FS_READY") await new Promise(r => setTimeout(r, 50));
-                log(`- ${fileName} saved to ESP.`);
+                log(`${fileName} saved to ESP32 ✅`);
+            }
+            log("<b>Transfer Complete.</b>");
+            document.getElementById('btnModem').disabled = false;
+        } catch (e) { log("Transfer Error: " + e, true); }
+    }
 
-                // 2. Provision to Modem
+    // BUTTON 3: Write all to Modem in order
+    async function doFullModemWrite() {
+        log("<b>Starting Write to BC660K Modem...</b>");
+        try {
+            for (const fileName of requiredFiles) {
+                log(`Provisioning: ${fileName}`);
                 bleResponse = null;
                 await bleChar.writeValue(new TextEncoder().encode("W" + fileName));
+                
                 let timeout = 0;
                 while(bleResponse !== "MODEM_OK") {
                     await new Promise(r => setTimeout(r, 250));
                     if(bleResponse === "MODEM_FAIL") throw new Error("Modem rejected " + fileName);
-                    if(timeout++ > 100) throw new Error("Modem Timeout");
+                    if(timeout++ > 120) throw new Error("Timeout waiting for modem response for " + fileName);
                 }
-                log(`- ${fileName} stored in BC660K ✅`);
+                log(`${fileName} written to modem slot ✅`);
             }
-            log("<b>PROVISIONING COMPLETE!</b> ✅✅✅");
-        } catch(e) { log("ERROR: " + e.message, true); }
+            log("<span class='status-ok'><b>ALL CERTIFICATES PROVISIONED SUCCESSFULLY!</b></span>");
+        } catch (e) { log("Modem Write Error: " + e, true); }
     }
 
     window.onload = async () => {
@@ -125,8 +145,8 @@
             const folders = await resp.json();
             const sel = document.getElementById('folderSel');
             folders.forEach(f => sel.innerHTML += `<option value="${f.id}">${f.name}</option>`);
-            log("Folders loaded.");
-        } catch(e) { log("Script Connection Failed.", true); }
+            log("Stations loaded from Drive.");
+        } catch(e) { log("Google Drive connection failed.", true); }
     };
 </script>
 </body>
